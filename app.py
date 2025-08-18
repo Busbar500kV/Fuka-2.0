@@ -8,7 +8,7 @@ from core.config import default_config, make_config_from_dict
 from core.engine import Engine
 
 # ---------- Page ----------
-st.set_page_config(page_title="Fuka 2.0 — Free-Energy Simulation", layout="wide")
+st.set_page_config(page_title="Fuka 2.0 — Free-Energy Simulation ~යසස් පොන්වීර~", layout="wide")
 
 # ---------- Load defaults (from file if present) ----------
 def load_defaults():
