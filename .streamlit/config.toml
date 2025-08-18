@@ -1,0 +1,6 @@
+[theme]
+base="dark"
+
+[server]
+# helps on Streamlit Cloud / mobile with many files
+fileWatcherType="none"
