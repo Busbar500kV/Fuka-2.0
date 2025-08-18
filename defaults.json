@@ -1,0 +1,21 @@
+{
+  "seed": 0,
+  "frames": 1200,
+  "space": 64,
+  "k_flux": 0.08,
+  "k_motor": 0.20,
+  "diffuse": 0.05,
+  "decay": 0.05,
+  "band": 3,
+  "bc": "reflect", 
+  "env": {
+    "length": 512,
+    "frames": 1200,
+    "noise_sigma": 0.01,
+    "sources": [
+      {"kind": "moving_peak", "amp": 1.0, "speed": 0.0, "width": 4.0, "start": 100}
+    ]
+  },
+  "chunk": 150,
+  "live": true
+}
