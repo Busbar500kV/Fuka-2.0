@@ -120,7 +120,8 @@ def draw_combined_heatmap(ph, E: np.ndarray, S: np.ndarray, title="Env + Substra
         coloraxis2=dict(colorscale="Inferno", colorbar=dict(title="Substrate", x=1.08)),
         height=620,
     )
-    ph.plotly_chart(fig, use_container_width=True, theme=None)
+    # >>> important: unique key <<<
+    ph.plotly_chart(fig, use_container_width=True, theme=None, key="combo_heatmap")
 
 def draw_energy_timeseries(ph, t, e_cell, e_env, e_flux, title="Energy vs time"):
     fig = go.Figure()
@@ -128,7 +129,8 @@ def draw_energy_timeseries(ph, t, e_cell, e_env, e_flux, title="Energy vs time")
     fig.add_trace(go.Scatter(x=t, y=e_env,  name="E_env"))
     fig.add_trace(go.Scatter(x=t, y=e_flux, name="E_flux"))
     fig.update_layout(xaxis_title="t (frames)", yaxis_title="energy", title=title, height=380)
-    ph.plotly_chart(fig, use_container_width=True, theme=None)
+    # >>> important: unique key <<<
+    ph.plotly_chart(fig, use_container_width=True, theme=None, key="energy_timeseries")
 
 # ---------- Run ----------
 if st.button("Run / Rerun", use_container_width=True):
@@ -140,7 +142,7 @@ if st.button("Run / Rerun", use_container_width=True):
         draw_energy_timeseries(energy_ph, engine.hist.t, engine.hist.E_cell, engine.hist.E_env, engine.hist.E_flux)
 
     if live:
-        # minimal fix: use a mutable container so we don't need 'nonlocal'
+        # use a tiny mutable so we don't need 'nonlocal'
         last = [-1]
 
         def cb(t: int):
