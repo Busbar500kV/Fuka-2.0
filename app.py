@@ -140,14 +140,14 @@ if st.button("Run / Rerun", use_container_width=True):
         draw_energy_timeseries(energy_ph, engine.hist.t, engine.hist.E_cell, engine.hist.E_env, engine.hist.E_flux)
 
     if live:
-        last = -1
-        
+        # minimal fix: use a mutable container so we don't need 'nonlocal'
+        last = [-1]
+
         def cb(t: int):
-            nonlocal last
-            if t - last >= int(chunk) or t == engine.T - 1:
-                last = t
+            if t - last[0] >= int(chunk) or t == engine.T - 1:
+                last[0] = t
                 redraw(t)
-        
+
         engine.run(progress_cb=cb)
         redraw(engine.T - 1)
     else:
