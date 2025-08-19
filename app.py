@@ -141,11 +141,13 @@ if st.button("Run / Rerun", use_container_width=True):
 
     if live:
         last = -1
+        
         def cb(t: int):
             nonlocal last
             if t - last >= int(chunk) or t == engine.T - 1:
                 last = t
                 redraw(t)
+        
         engine.run(progress_cb=cb)
         redraw(engine.T - 1)
     else:
