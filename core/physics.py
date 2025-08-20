@@ -1,32 +1,37 @@
 import numpy as np
+from scipy.ndimage import gaussian_filter1d
 
 def resample_row(row: np.ndarray, target_len: int) -> np.ndarray:
-    """Linear resample of a 1D row to target_len."""
-    src = row.shape[0]
-    if src == target_len:
+    """Resample a 1D row to `target_len` using linear interpolation."""
+    src_len = len(row)
+    if src_len == target_len:
         return row
-    x_src = np.linspace(0.0, 1.0, src)
-    x_tgt = np.linspace(0.0, 1.0, target_len)
+    x_src = np.linspace(0, 1, src_len)
+    x_tgt = np.linspace(0, 1, target_len)
     return np.interp(x_tgt, x_src, row)
 
-def _neighbors_1d(a: np.ndarray, bc: str) -> tuple[np.ndarray, np.ndarray]:
-    """Left/right neighbors under boundary condition."""
-    X = a.size
-    left  = np.empty_like(a)
-    right = np.empty_like(a)
+def _band_mask(X: int, center: int, half_width: int, bc: str) -> np.ndarray:
+    """1 where the gate band is active; 0 elsewhere."""
+    mask = np.zeros(X, dtype=float)
+    hw = max(0, int(half_width))
+    c = int(center)
     if bc == "periodic":
-        left  = np.roll(a,  1)
-        right = np.roll(a, -1)
-    elif bc == "reflect":
-        left[0] = a[0];          left[1:]  = a[:-1]
-        right[-1] = a[-1];       right[:-1] = a[1:]
-    elif bc == "absorb" or bc == "wall":
-        left[0] = 0.0;           left[1:]  = a[:-1]
-        right[-1] = 0.0;         right[:-1] = a[1:]
-    else:  # fallback
-        left  = np.roll(a,  1)
-        right = np.roll(a, -1)
-    return left, right
+        for dx in range(-hw, hw + 1):
+            mask[(c + dx) % X] = 1.0
+    else:
+        for dx in range(-hw, hw + 1):
+            j = c + dx
+            if 0 <= j < X:
+                mask[j] = 1.0
+    return mask
+
+def _mode_for_gaussian(bc: str) -> str:
+    return {
+        "periodic": "wrap",
+        "reflect":  "reflect",
+        "absorb":   "constant",
+        "wall":     "constant",
+    }.get(bc, "reflect")
 
 def step_physics(
     prev_S: np.ndarray,
@@ -36,41 +41,43 @@ def step_physics(
     diffuse: float,
     decay: float,
     rng: np.random.Generator,
-    band: int,
-    bc: str,
+    band: int = 3,
+    bc: str = "reflect",
+    center: int = 0,
 ) -> tuple[np.ndarray, float]:
     """
-    One local update step.
-      - env→substrate coupling acts only on a 'band' at the left edge (x in [0, band))
-      - motor = zero-mean exploration noise at the same band
-      - diffusion via discrete Laplacian under requested boundary condition
+    One physics update step with a place-able 'gate' band that couples env→substrate.
+
+    - Flux and motor act only on the gate band (center ± band).
+    - Diffusion is BC-aware via gaussian_filter1d(mode=...).
     """
-    X = prev_S.size
-    band = max(1, min(int(band), X))
-    mask = np.zeros(X, dtype=float)
-    mask[:band] = 1.0
+    X = len(prev_S)
+    gate = _band_mask(X, center=center, half_width=band, bc=bc)
 
-    # env flux into boundary band
-    drive = env_row - prev_S
-    flux = k_flux * drive * mask
+    # External flux (only through gate cells)
+    drive = env_row * gate
+    flux = k_flux * (drive - prev_S * gate)  # only gate cells are driven
 
-    # exploratory motor noise on band
+    # Motor/self exploration (random pushes at the gate cells)
     motor = np.zeros_like(prev_S)
-    if k_motor > 0:
-        motor[:band] = k_motor * rng.normal(size=band)
+    if gate.any() and k_motor != 0.0:
+        n = int(gate.sum())
+        motor[gate > 0] = k_motor * rng.random(n)
 
-    # diffusion (nearest-neighbor Laplacian)
-    left, right = _neighbors_1d(prev_S, bc)
-    lap = left + right - 2.0 * prev_S
+    # Base update
+    new_S = prev_S + flux + motor
 
-    new_S = prev_S + flux + motor + diffuse * lap
+    # Diffusion: BC-aware smoothing blended by `diffuse`
+    if diffuse > 0:
+        smoothed = gaussian_filter1d(new_S, sigma=max(1.0, band), mode=_mode_for_gaussian(bc), cval=0.0)
+        new_S = (1.0 - diffuse) * new_S + diffuse * smoothed
+
+    # Decay
     new_S *= (1.0 - decay)
 
-    # keep non-negative “stored energy”
-    new_S = np.maximum(new_S, 0.0)
+    # Tiny ambient noise everywhere (helps break symmetry)
+    new_S += 0.01 * rng.standard_normal(size=X)
 
-    # a gentle cap to avoid blow-ups (doesn't usually bind)
-    if new_S.max() > 1e6:
-        new_S = np.minimum(new_S, 1e6)
-
-    return new_S, float(np.sum(np.abs(flux)))
+    # Flux metric for plots
+    flux_sum = float(np.sum(np.abs(flux)))
+    return new_S, flux_sum
