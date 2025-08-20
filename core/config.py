@@ -18,17 +18,21 @@ class Config:
     space: int = 64
 
     # physics knobs
-    k_flux: float = 0.05         # env→substrate coupling (at boundary band)
-    k_motor: float = 0.20        # exploratory noise at boundary band
+    k_flux: float = 0.05         # env→substrate coupling (at gate band)
+    k_motor: float = 0.20        # exploratory noise at gate band
     diffuse: float = 0.05        # local spread
     decay: float = 0.01          # loss per step
-    band: int = 3                # boundary width (cells)
+    band: int = 3                # gate (boundary) half-width (cells)
     bc: str = "reflect"          # "periodic" | "reflect" | "absorb" | "wall"
+    gate_center: int = 0         # index (0..space-1) where the gate band is centered
 
     env: FieldCfg = field(default_factory=FieldCfg)
 
 def default_config() -> Dict:
-    return asdict(Config())
+    d = asdict(Config())
+    # make the default gate sit in the middle by default_config()
+    d["gate_center"] = d["space"] // 2
+    return d
 
 def make_config_from_dict(d: Dict) -> Config:
     env_d = d.get("env", {})
@@ -41,15 +45,20 @@ def make_config_from_dict(d: Dict) -> Config:
     bc = str(d.get("bc", "reflect")).lower()
     if bc not in ("periodic", "reflect", "absorb", "wall"):
         bc = "reflect"
+
+    space = int(d.get("space", 64))
+    gate_center = int(d.get("gate_center", space // 2)) % max(1, space)
+
     return Config(
         seed=int(d.get("seed", 0)),
         frames=int(d.get("frames", 5000)),
-        space=int(d.get("space", 64)),
+        space=space,
         k_flux=float(d.get("k_flux", 0.05)),
         k_motor=float(d.get("k_motor", 0.20)),
         diffuse=float(d.get("diffuse", 0.05)),
         decay=float(d.get("decay", 0.01)),
         band=int(d.get("band", 3)),
         bc=bc,
+        gate_center=gate_center,
         env=fcfg,
     )
