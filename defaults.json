@@ -8,13 +8,22 @@
   "decay": 0.05,
   "band": 3,
   "bc": "reflect",
-  "gate_center": 32,
   "env": {
     "length": 512,
+    "height": 512,               // <— NEW: 2D env height (Y)
     "frames": 1200,
     "noise_sigma": 0.01,
     "sources": [
-      { "kind": "moving_peak", "amp": 1.0, "speed": 0.0, "width": 4.0, "start": 256 }
+      {
+        "kind": "moving_peak_2d",
+        "amp": 1.0,
+        "speed_x": 0.0,
+        "speed_y": 0.0,
+        "width_x": 10.0,
+        "width_y": 10.0,
+        "start_x": 256,
+        "start_y": 256
+      }
     ]
   },
   "chunk": 150,
