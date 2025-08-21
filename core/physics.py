@@ -1,9 +1,11 @@
 # core/physics.py
+from __future__ import annotations
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
+
 # ---------------------------
-# Resampling helpers (1-D)
+# Resampling helpers
 # ---------------------------
 def resample_row(row: np.ndarray, target_len: int) -> np.ndarray:
     """
@@ -17,6 +19,33 @@ def resample_row(row: np.ndarray, target_len: int) -> np.ndarray:
     x_src = np.linspace(0.0, 1.0, src_len)
     x_tgt = np.linspace(0.0, 1.0, target_len)
     return np.interp(x_tgt, x_src, row)
+
+
+def resample_plane(img: np.ndarray, target_hw: tuple[int, int]) -> np.ndarray:
+    """
+    Simple separable linear resample of a 2D array to (H_tgt, W_tgt).
+    Not used by the 1-D engine, but provided for 2-D substrates.
+    """
+    img = np.asarray(img, dtype=float)
+    H, W = img.shape
+    Ht, Wt = int(target_hw[0]), int(target_hw[1])
+    if (H, W) == (Ht, Wt):
+        return img
+
+    # resample rows -> (H, Wt)
+    x_src = np.linspace(0.0, 1.0, W)
+    x_tgt = np.linspace(0.0, 1.0, Wt)
+    tmp = np.empty((H, Wt), dtype=float)
+    for r in range(H):
+        tmp[r] = np.interp(x_tgt, x_src, img[r])
+
+    # resample columns -> (Ht, Wt)
+    y_src = np.linspace(0.0, 1.0, H)
+    y_tgt = np.linspace(0.0, 1.0, Ht)
+    out = np.empty((Ht, Wt), dtype=float)
+    for c in range(Wt):
+        out[:, c] = np.interp(y_tgt, y_src, tmp[:, c])
+    return out
 
 
 # ---------------------------
@@ -37,17 +66,16 @@ def _mode_for_gaussian(bc: str) -> str:
 def _grad_mag(A: np.ndarray) -> np.ndarray:
     """
     Gradient magnitude for 1-D/2-D/N-D arrays using central differences.
+    Returns array with same shape as A.
     """
     grads = np.gradient(A)
-    # np.gradient returns a list; for 1-D it's a single array.
     if isinstance(grads, list):
-        sq = 0.0
+        acc = np.zeros_like(A, dtype=float)
         for g in grads:
-            sq = sq + np.square(g)
-        return np.sqrt(sq, dtype=float)
-    else:
-        # 1-D fast-path safety
-        return np.abs(grads).astype(float)
+            acc += g.astype(float) ** 2
+        return np.sqrt(acc, dtype=float)
+    # 1-D fast path (np.gradient gave a single array)
+    return np.abs(grads).astype(float)
 
 
 # ---------------------------
@@ -111,7 +139,7 @@ def step_physics(
     # Coupling weight: where env edge > substrate edge
     w = np.maximum(gE - gS, 0.0)
     max_gE = float(np.max(gE)) if np.size(gE) else 0.0
-    if max_gE > 0:
+    if max_gE > 0.0:
         w = w / (max_gE + 1e-12)
 
     # --- Flux term: pull S toward E, but only where w>0 ---
@@ -119,9 +147,9 @@ def step_physics(
 
     # --- Motor/exploration: noise concentrated along current S edges ---
     if k_motor != 0.0:
-        # normalize gS to [0,1] to scale noise
-        if np.any(gS > 0):
-            gS_scale = gS / (np.max(gS) + 1e-12)
+        max_gS = float(np.max(gS)) if np.size(gS) else 0.0
+        if max_gS > 0.0:
+            gS_scale = gS / (max_gS + 1e-12)
         else:
             gS_scale = 0.0
         motor = k_motor * rng.standard_normal(size=S.shape) * gS_scale
@@ -133,7 +161,7 @@ def step_physics(
 
     # --- Diffusion (BC-aware gaussian blend) ---
     if diffuse > 0.0:
-        sigma = 1.0  # small, local
+        sigma = 1.0  # small local smoothing in all available dims
         mode = _mode_for_gaussian(bc)
         smoothed = gaussian_filter(new_S, sigma=sigma, mode=mode, cval=0.0)
         new_S = (1.0 - diffuse) * new_S + diffuse * smoothed
@@ -141,9 +169,9 @@ def step_physics(
     # --- Decay ---
     new_S *= (1.0 - decay)
 
-    # --- Small ambient noise to avoid getting stuck completely ---
+    # --- Small ambient noise to avoid total stasis ---
     new_S += 1e-3 * rng.standard_normal(size=S.shape)
 
-    # flux metric for plots
+    # Flux metric for plots (mean absolute flux)
     flux_metric = float(np.mean(np.abs(flux)))
     return new_S, flux_metric
