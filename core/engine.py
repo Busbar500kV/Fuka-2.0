@@ -1,5 +1,7 @@
 # core/engine.py
+from __future__ import annotations
 import numpy as np
+
 from .config import Config
 from .env import build_env
 from .organism import History
@@ -43,8 +45,7 @@ class Engine:
 
     - 1D mode: env has shape (T, X_env), substrate S has shape (T, X).
     - 2D mode: env has shape (T, Y_env, X_env), substrate S has shape (T, Y, X),
-               where Y = X = cfg.space (square substrate). Each row (y) is updated
-               by the existing 1D step_physics, so physics.py does not need changes.
+               where Y = X = cfg.space (square substrate).
     """
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -71,9 +72,6 @@ class Engine:
 
         self.hist = History()
 
-        # Optional gate center (used only by 1D step_physics that expects it)
-        self._gate_center = getattr(self.cfg, "gate_center", 0)
-
     # ---------- stepping ----------
     def _step_1d(self, t: int):
         e_row = self.env[t]                            # (X_env,)
@@ -88,9 +86,8 @@ class Engine:
             diffuse=self.cfg.diffuse,
             decay=self.cfg.decay,
             rng=self.rng,
-            band=self.cfg.band,
+            band=self.cfg.band,        # accepted by physics (ignored for emergent boundary)
             bc=self.cfg.bc,
-            center=self._gate_center,
         )
         self.S[t] = cur
 
@@ -107,27 +104,19 @@ class Engine:
 
         # previous substrate (Y, X)
         prev = self.S[t-1] if t > 0 else self.S[0]
-        cur  = np.empty_like(prev)
-        flux_accum = 0.0
 
-        # Update row-by-row using the existing 1D physics
-        for y in range(self.Y):
-            row_prev = prev[y]                # (X,)
-            row_env  = E_t[y]                 # (X,)
-            row_cur, row_flux = step_physics(
-                prev_S=row_prev,
-                env_row=row_env,
-                k_flux=self.cfg.k_flux,
-                k_motor=self.cfg.k_motor,
-                diffuse=self.cfg.diffuse,
-                decay=self.cfg.decay,
-                rng=self.rng,
-                band=self.cfg.band,
-                bc=self.cfg.bc,
-                center=self._gate_center,     # keeps compatibility; can remove later
-            )
-            cur[y] = row_cur
-            flux_accum += float(row_flux)
+        # --- NEW: single N-D physics update (no row loop) ---
+        cur, flux = step_physics(
+            prev_S=prev,         # (Y, X)
+            env_row=E_t,         # (Y, X)
+            k_flux=self.cfg.k_flux,
+            k_motor=self.cfg.k_motor,
+            diffuse=self.cfg.diffuse,
+            decay=self.cfg.decay,
+            rng=self.rng,
+            band=self.cfg.band,  # accepted but not used by emergent boundary
+            bc=self.cfg.bc,
+        )
 
         self.S[t] = cur
 
@@ -135,8 +124,7 @@ class Engine:
         self.hist.t.append(t)
         self.hist.E_cell.append(float(np.mean(cur)))
         self.hist.E_env.append(float(np.mean(E_t)))
-        # average flux per row (so scale is comparable to 1D)
-        self.hist.E_flux.append(float(flux_accum / max(1, self.Y)))
+        self.hist.E_flux.append(float(flux))   # already mean-abs flux from physics
 
     def step(self, t: int):
         if self.mode == "1d":
