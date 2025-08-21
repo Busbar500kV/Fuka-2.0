@@ -22,9 +22,20 @@ def load_defaults():
 
 cfg = load_defaults()
 
-# unique run id for chart keys
+# ---------- session keys ----------
 if "run_id" not in st.session_state:
     st.session_state["run_id"] = 0
+if "combo2d_count" not in st.session_state:
+    st.session_state["combo2d_count"] = 0
+if "energy_count" not in st.session_state:
+    st.session_state["energy_count"] = 0
+if "combo3d_count" not in st.session_state:
+    st.session_state["combo3d_count"] = 0
+
+def new_key(base: str) -> str:
+    """Unique key per draw within a run to satisfy Streamlit."""
+    st.session_state[base + "_count"] += 1
+    return f"{base}_{st.session_state['run_id']}_{st.session_state[base + '_count']}"
 
 # ---------- Sidebar controls ----------
 with st.sidebar:
@@ -115,7 +126,7 @@ def _resample_rows(M: np.ndarray, new_len: int) -> np.ndarray:
         out[t] = np.interp(x_tgt, x_src, M[t])
     return out
 
-def draw_combined_heatmap(ph, E: np.ndarray, S: np.ndarray, run_key: str, title="Env + Substrate (combined, zoomable)"):
+def draw_combined_heatmap(ph, E: np.ndarray, S: np.ndarray, title="Env + Substrate (combined, zoomable)"):
     if S.shape[1] != E.shape[1]:
         S_res = _resample_rows(S, E.shape[1])
     else:
@@ -135,18 +146,20 @@ def draw_combined_heatmap(ph, E: np.ndarray, S: np.ndarray, run_key: str, title=
         height=620,
         template="plotly_dark",
     )
-    ph.plotly_chart(fig, use_container_width=True, theme=None, key=f"combo2d_{run_key}")
+    # UNIQUE key each draw:
+    combo_key = new_key("combo2d")
+    ph.plotly_chart(fig, use_container_width=True, theme=None, key=combo_key)
 
-def draw_energy_timeseries(ph, t, e_cell, e_env, e_flux, run_key: str, title="Energy vs time"):
+def draw_energy_timeseries(ph, t, e_cell, e_env, e_flux, title="Energy vs time"):
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=t, y=e_cell, name="E_cell"))
     fig.add_trace(go.Scatter(x=t, y=e_env,  name="E_env"))
     fig.add_trace(go.Scatter(x=t, y=e_flux, name="E_flux"))
     fig.update_layout(xaxis_title="t (frames)", yaxis_title="energy", title=title, height=380, template="plotly_dark")
-    ph.plotly_chart(fig, use_container_width=True, theme=None, key=f"energy_ts_{run_key}")
+    energy_key = new_key("energy")
+    ph.plotly_chart(fig, use_container_width=True, theme=None, key=energy_key)
 
-def draw_sparse_3d(ph, E: np.ndarray, S: np.ndarray, thr: float, max_points: int, run_key: str):
-    """Sparse 3‑D point cloud: x (space), y∈{0,1} for Env/Substrate, z=t."""
+def draw_sparse_3d(ph, E: np.ndarray, S: np.ndarray, thr: float, max_points: int):
     if S.shape[1] != E.shape[1]:
         S_res = _resample_rows(S, E.shape[1])
     else:
@@ -185,22 +198,25 @@ def draw_sparse_3d(ph, E: np.ndarray, S: np.ndarray, thr: float, max_points: int
         template="plotly_dark",
         showlegend=True,
     )
-    ph.plotly_chart(fig, use_container_width=True, theme=None, key=f"combo3d_{run_key}")
+    key3d = new_key("combo3d")
+    ph.plotly_chart(fig, use_container_width=True, theme=None, key=key3d)
 
 # ---------- Run ----------
 if st.button("Run / Rerun", use_container_width=True):
-    # bump run id so keys are unique for this run
+    # new run: bump run id and reset per‑run counters
     st.session_state["run_id"] += 1
-    run_key = str(st.session_state["run_id"])
+    st.session_state["combo2d_count"] = 0
+    st.session_state["energy_count"]  = 0
+    st.session_state["combo3d_count"] = 0
 
     ecfg = make_config_from_dict(user_cfg)
     engine = Engine(ecfg)
 
     def redraw(upto: int, final: bool = False):
-        draw_combined_heatmap(combo2d_ph, engine.env[:upto+1], engine.S[:upto+1], run_key=run_key)
-        draw_energy_timeseries(energy_ph, engine.hist.t, engine.hist.E_cell, engine.hist.E_env, engine.hist.E_flux, run_key=run_key)
+        draw_combined_heatmap(combo2d_ph, engine.env[:upto+1], engine.S[:upto+1])
+        draw_energy_timeseries(energy_ph, engine.hist.t, engine.hist.E_cell, engine.hist.E_env, engine.hist.E_flux)
         if final:
-            draw_sparse_3d(plot3d_ph, engine.env, engine.S, thr=thr3d, max_points=int(max3d), run_key=run_key)
+            draw_sparse_3d(plot3d_ph, engine.env, engine.S, thr=float(thr3d), max_points=int(max3d))
 
     if live:
         last = [-1]
