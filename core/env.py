@@ -1,39 +1,52 @@
 # core/env.py
 from __future__ import annotations
-import numpy as np
 from typing import Dict, Any, Iterable
+import numpy as np
+
 from .config import FieldCfg
 
 
-# ---------- helpers (periodic distances) ----------
+# ------------------------------
+# helpers (periodic distances)
+# ------------------------------
 def _ring_dist(n: int, x: np.ndarray, x0: float) -> np.ndarray:
     """Shortest periodic distance on a ring of length n."""
     d = np.abs(x - x0)
     return np.minimum(d, n - d)
 
+
 def _gauss_1d(n: int, pos: float, amp: float, width: float) -> np.ndarray:
+    """Periodic 1-D Gaussian on a ring of length n."""
     x = np.arange(n, dtype=float)
     d = _ring_dist(n, x, pos)
     w = max(1e-9, float(width))
     return float(amp) * np.exp(-(d * d) / (2.0 * w * w))
 
+
 def _gauss_2d(nx: int, ny: int, x0: float, y0: float, amp: float, wx: float, wy: float) -> np.ndarray:
     """
     Separable periodic Gaussian on a torus (ny, nx) centered at (x0, y0).
+    Returns an array of shape (ny, nx).
     """
     xs = np.arange(nx, dtype=float)
     ys = np.arange(ny, dtype=float)
-    dx = _ring_dist(nx, xs, x0)           # shape (nx,)
-    dy = _ring_dist(ny, ys, y0)           # shape (ny,)
+
+    dx = _ring_dist(nx, xs, x0)       # (nx,)
+    dy = _ring_dist(ny, ys, y0)       # (ny,)
+
     wx = max(1e-9, float(wx))
     wy = max(1e-9, float(wy))
+
     gx = np.exp(-(dx * dx) / (2.0 * wx * wx))       # (nx,)
     gy = np.exp(-(dy * dy) / (2.0 * wy * wy))       # (ny,)
+
     # outer product -> (ny, nx)
     return float(amp) * (gy[:, None] * gx[None, :])
 
 
-# ---------- public builders ----------
+# ------------------------------
+# environment builder
+# ------------------------------
 def build_env(cfg: FieldCfg, rng: np.random.Generator) -> np.ndarray:
     """
     Build environment timeline.
@@ -42,34 +55,35 @@ def build_env(cfg: FieldCfg, rng: np.random.Generator) -> np.ndarray:
     field over time: E[t, y, x] with periodic wrap in both x and y.
     Otherwise we produce the original 1D spatial field: E[t, x].
 
-    Supported sources (examples):
+    Supported sources:
 
     1D:
       {"kind":"moving_peak", "amp":1.0, "speed":0.0, "width":4.0, "start":100}
 
-    2D (two variants):
-      # fully 2D moving peak
+    2D:
       {"kind":"moving_peak_2d","amp":1.0,"speed_x":0.02,"speed_y":-0.01,
-       "width_x":4.0,"width_y":4.0,"start_x":200,"start_y":150}
+       "width_x":4.0,"width_y":4.0,"start_x":X//2,"start_y":Y//2}
 
-      # convenience: 1D descriptor broadcast with a Gaussian in y
-      {"kind":"moving_peak","amp":1.0,"speed":0.02,"width":4.0,"start":200,
-       "y_center": "mid", "width_y": 6.0}
+      # “broadcasted” 1D descriptor with Gaussian in y
+      {"kind":"moving_peak","amp":1.0,"speed":0.02,"width":4.0,"start":X//2,
+       "y_center":"mid","width_y":6.0}
     """
     T = int(cfg.frames)
     X = int(cfg.length)
-    H = int(getattr(cfg, "height", getattr(cfg, "H", 1)))  # optional; default 1 (1D)
+    # Optional height (Y). If absent, treat as 1 (i.e., 1-D).
+    Y = int(getattr(cfg, "height", getattr(cfg, "H", 1)))
 
-    # ---------- 1D path (back-compatible) ----------
-    if H <= 1:
+    # ---------- 1-D path ----------
+    if Y <= 1:
         E = np.zeros((T, X), dtype=float)
         for s in cfg.sources:
             if s.get("kind", "moving_peak") != "moving_peak":
                 continue
             amp   = float(s.get("amp", 1.0))
-            speed = float(s.get("speed", 0.0)) * X            # cells/frame
+            speed = float(s.get("speed", 0.0)) * X   # cells/frame
             width = float(s.get("width", 4.0))
             pos   = float(int(s.get("start", 0)) % X)
+
             for t in range(T):
                 E[t] += _gauss_1d(X, pos, amp, width)
                 pos = (pos + speed) % X
@@ -80,8 +94,7 @@ def build_env(cfg: FieldCfg, rng: np.random.Generator) -> np.ndarray:
         np.maximum(E, 0.0, out=E)
         return E
 
-    # ---------- 2D path (E[t, y, x]) ----------
-    Y = H
+    # ---------- 2-D path: E[t, y, x] ----------
     E = np.zeros((T, Y, X), dtype=float)
 
     for s in cfg.sources:
@@ -93,19 +106,21 @@ def build_env(cfg: FieldCfg, rng: np.random.Generator) -> np.ndarray:
             sy  = float(s.get("speed_y", 0.0)) * Y
             wx  = float(s.get("width_x", 4.0))
             wy  = float(s.get("width_y", 4.0))
+            # default to the center of the field
             x   = float(int(s.get("start_x", X // 2)) % X)
             y   = float(int(s.get("start_y", Y // 2)) % Y)
+
             for t in range(T):
                 E[t] += _gauss_2d(X, Y, x, y, amp, wx, wy)
                 x = (x + sx) % X
                 y = (y + sy) % Y
 
         elif kind == "moving_peak":
-            # 1D descriptor, broadcasted in y with a Gaussian profile
+            # 1D along x, broadcast in y with a Gaussian profile
             amp   = float(s.get("amp", 1.0))
             speed = float(s.get("speed", 0.0)) * X
             width = float(s.get("width", 4.0))
-            # center in y: number or "mid"
+
             yc = s.get("y_center", "mid")
             if isinstance(yc, str) and yc.lower() == "mid":
                 yc = Y / 2.0
@@ -113,13 +128,12 @@ def build_env(cfg: FieldCfg, rng: np.random.Generator) -> np.ndarray:
             wy = float(s.get("width_y", width))
 
             x = float(int(s.get("start", X // 2)) % X)
+
             for t in range(T):
-                # separable: g_y(y) * g_x(x)
-                slab = _gauss_2d(X, Y, x, yc, amp, width, wy)
-                E[t] += slab
+                E[t] += _gauss_2d(X, Y, x, yc, amp, width, wy)
                 x = (x + speed) % X
 
-        # (ignore unknown kinds silently for now)
+        # Unknown kinds are ignored for now
 
     if cfg.noise_sigma > 0:
         E += rng.normal(0.0, cfg.noise_sigma, size=E.shape)
