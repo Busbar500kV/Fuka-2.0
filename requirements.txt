@@ -1,4 +1,4 @@
 streamlit
 plotly
 numpy
-scipy
+scipy>=1.10
