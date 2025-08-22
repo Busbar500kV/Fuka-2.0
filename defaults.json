@@ -49,5 +49,15 @@
   },
 
   "chunk": 150,
-  "live": true
+  "live": true,
+
+  "thr3d": 0.75,
+  "max3d": 40000,
+
+  "vis": {
+    "heat_floor": 0.10,       // hide low energy (< 10%) in heatmaps for clarity
+    "heat_gamma": 1.0,        // optional contrast curve (1.0 = linear)
+    "env_opacity": 1.0,       // heatmap layer opacity for Env
+    "sub_opacity": 0.85       // heatmap layer opacity for Substrate
+  }
 }
