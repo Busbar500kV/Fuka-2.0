@@ -1,5 +1,7 @@
 # core/engine.py
+from __future__ import annotations
 import numpy as np
+
 from .config import Config
 from .env import build_env
 from .organism import History
@@ -34,12 +36,13 @@ def _resample_2d(frame: np.ndarray, new_y: int, new_x: int) -> np.ndarray:
     else:
         return tmp
 
+
 class Engine:
     """
-    Streaming-capable engine.
+    Streaming‑capable engine.
 
-    - 1D mode: env shape (T, X_env)  -> S shape (T, X)
-    - 2D mode: env shape (T, Y_env, X_env) -> S shape (T, Y, X) with Y=X=cfg.space
+    - 1D: env shape (T, X_env), substrate S shape (T, X).
+    - 2D: env shape (T, Y_env, X_env), substrate S shape (T, Y, X) with Y=X=cfg.space.
     """
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -47,14 +50,16 @@ class Engine:
 
         # Build full environment timeline
         self.env = build_env(cfg.env, self.rng)  # (T, X_env) or (T, Y_env, X_env)
-        self.T   = int(cfg.frames)
+        self.T = int(cfg.frames)
 
-        # Determine dimensionality from env
+        # Determine dimensionality and allocate substrate
         if self.env.ndim == 2:
+            # 1‑D substrate
             self.mode = "1d"
             self.X = int(cfg.space)
             self.S = np.zeros((self.T, self.X), dtype=float)
         elif self.env.ndim == 3:
+            # 2‑D substrate (square: Y=X=space)
             self.mode = "2d"
             self.Y = int(cfg.space)
             self.X = int(cfg.space)
@@ -64,13 +69,11 @@ class Engine:
 
         self.hist = History()
 
-        # keep for 1D compatibility; ignored by 2D step
-        self._gate_center = getattr(self.cfg, "gate_center", 0)
-
-    # ---------- stepping ----------
+    # ---------- steps ----------
     def _step_1d(self, t: int):
+        # env row -> resample to substrate width
         e_row = self.env[t]                 # (X_env,)
-        e_row = resample_row(e_row, self.X) # -> (X,)
+        e_row = resample_row(e_row, self.X) # (X,)
 
         prev = self.S[t-1] if t > 0 else self.S[0]
         cur, flux = step_physics(
@@ -83,47 +86,44 @@ class Engine:
             rng=self.rng,
             band=self.cfg.band,
             bc=self.cfg.bc,
-            center=self._gate_center,  # harmless if ignored
         )
+        # cur is (X,)
         self.S[t] = cur
 
-        # bookkeeping
+        # telemetry
         self.hist.t.append(t)
         self.hist.E_cell.append(float(np.mean(cur)))
         self.hist.E_env.append(float(np.mean(e_row)))
         self.hist.E_flux.append(float(flux))
 
     def _step_2d(self, t: int):
-        # env slice (Y_env, X_env) -> resample to (Y, X)
+        # env frame (Y_env, X_env) -> resample to (Y, X)
         E_t = self.env[t]
-        E_t = _resample_2d(E_t, new_y=self.Y, new_x=self.X)
+        E_t_rs = _resample_2d(E_t, new_y=self.Y, new_x=self.X)  # (Y, X)
 
-        prev = self.S[t-1] if t > 0 else self.S[0]
-
-        # *** one-shot 2D physics (no row loop; avoids shape (2,Y,X) mistakes) ***
-        cur, flux_metric = step_physics(
-            prev_S=prev,      # (Y, X)
-            env_row=E_t,      # (Y, X)
+        prev = self.S[t-1] if t > 0 else self.S[0]              # (Y, X)
+        cur, flux = step_physics(
+            prev_S=prev,             # (Y, X)
+            env_row=E_t_rs,          # (Y, X)
             k_flux=self.cfg.k_flux,
             k_motor=self.cfg.k_motor,
             diffuse=self.cfg.diffuse,
             decay=self.cfg.decay,
             rng=self.rng,
-            band=self.cfg.band,  # accepted/ignored by physics
+            band=self.cfg.band,      # accepted by step_physics (ignored in emergent mode)
             bc=self.cfg.bc,
         )
-
-        # ensure shape is exactly (Y, X)
+        # Sanity: ensure we got exactly (Y, X)
         if cur.shape != (self.Y, self.X):
             raise ValueError(f"Unexpected physics output shape {cur.shape}, expected {(self.Y, self.X)}")
 
         self.S[t] = cur
 
-        # bookkeeping
+        # telemetry
         self.hist.t.append(t)
         self.hist.E_cell.append(float(np.mean(cur)))
-        self.hist.E_env.append(float(np.mean(E_t)))
-        self.hist.E_flux.append(float(flux_metric))
+        self.hist.E_env.append(float(np.mean(E_t_rs)))
+        self.hist.E_flux.append(float(flux))
 
     def step(self, t: int):
         if self.mode == "1d":
