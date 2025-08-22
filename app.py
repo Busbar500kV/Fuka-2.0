@@ -45,7 +45,7 @@ def _float_slider_bounds(label: str, val: float) -> Tuple[float, float, float]:
     name = label.lower()
     step = round(_num_step(val), 6)
 
-    if 0.0 <= val <= 1.0 or any(s in name for s in ["sigma", "noise", "decay", "diffuse", "k_", "thr", "threshold"]):
+    if 0.0 <= val <= 1.0 or any(s in name for s in ["sigma", "noise", "decay", "diffuse", "k_", "thr", "threshold", "opacity", "gamma", "floor"]):
         lo, hi = 0.0, 1.0
         if val > 1.0:
             hi = max(1.0, float(val) * 10.0)
@@ -136,6 +136,14 @@ live  = bool(user_cfg.pop("live",  cfg_default.get("live",  True)))
 thr3d = float(user_cfg.pop("thr3d", cfg_default.get("thr3d", 0.75)))
 max3d = int(user_cfg.pop("max3d",  cfg_default.get("max3d",  40_000)))
 
+# Pull out visual knobs for 2‑D combined heatmap
+_vis_default = cfg_default.get("vis", {})
+vis = user_cfg.pop("vis", _vis_default)
+heat_floor  = float(vis.get("heat_floor", 0.10))
+heat_gamma  = float(vis.get("heat_gamma", 1.0))
+env_opacity = float(vis.get("env_opacity", 1.0))
+sub_opacity = float(vis.get("sub_opacity", 0.85))
+
 # ---------- Layout placeholders ----------
 st.title("Simulation")
 combo2d_ph = st.empty()
@@ -149,6 +157,15 @@ def _norm(A: np.ndarray) -> np.ndarray:
     if not np.isfinite(m) or not np.isfinite(M) or M - m < 1e-12:
         return np.zeros_like(A)
     return (A - m) / (M - m + 1e-12)
+
+def _apply_floor_gamma(Z: np.ndarray, floor: float, gamma: float) -> np.ndarray:
+    """Apply optional gamma, then floor to NaN for better visibility."""
+    Z = np.clip(Z, 0.0, 1.0)
+    if gamma != 1.0:
+        Z = Z ** float(gamma)
+    if floor > 0.0:
+        Z = np.where(Z >= floor, Z, np.nan)  # hide low-energy pixels
+    return Z
 
 def _resample_rows(M: np.ndarray, new_len: int) -> np.ndarray:
     T, X = M.shape
@@ -173,12 +190,12 @@ def draw_combined_heatmap(ph, E: np.ndarray, S: np.ndarray, title="Env + Substra
     else:
         S_res = S
 
-    En = _norm(E)
-    Sn = _norm(S_res)
+    En = _apply_floor_gamma(_norm(E), heat_floor, heat_gamma)
+    Sn = _apply_floor_gamma(_norm(S_res), heat_floor, heat_gamma)
 
     fig = go.Figure()
-    fig.add_trace(go.Heatmap(z=En, coloraxis="coloraxis", zsmooth=False, name="Env"))
-    fig.add_trace(go.Heatmap(z=Sn, coloraxis="coloraxis2", zsmooth=False, opacity=0.85, name="Substrate"))
+    fig.add_trace(go.Heatmap(z=En, coloraxis="coloraxis", zsmooth=False, name="Env", opacity=env_opacity))
+    fig.add_trace(go.Heatmap(z=Sn, coloraxis="coloraxis2", zsmooth=False, name="Substrate", opacity=sub_opacity))
     fig.update_layout(
         title=title,
         xaxis_title="x (space)",
