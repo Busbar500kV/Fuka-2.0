@@ -7,6 +7,7 @@ from .env import build_env
 from .organism import History
 from .physics import step_physics, resample_row
 
+
 def _resample_2d(frame: np.ndarray, new_y: int, new_x: int) -> np.ndarray:
     """
     Resample a 2D array [Y0, X0] -> [new_y, new_x] with separable linear interpolation.
@@ -113,6 +114,11 @@ class Engine:
             band=self.cfg.band,      # accepted by step_physics (ignored in emergent mode)
             bc=self.cfg.bc,
         )
+
+        # --- compatibility shim: if some physics impl returns (2, Y, X) stack, take channel 0
+        if cur.ndim == 3 and cur.shape[0] == 2 and cur.shape[1:] == (self.Y, self.X):
+            cur = cur[0]
+
         # Sanity: ensure we got exactly (Y, X)
         if cur.shape != (self.Y, self.X):
             raise ValueError(f"Unexpected physics output shape {cur.shape}, expected {(self.Y, self.X)}")
