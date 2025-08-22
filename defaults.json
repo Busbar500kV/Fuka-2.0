@@ -1,31 +1,53 @@
 {
   "seed": 0,
-  "frames": 1200,
+  "frames": 2000,
   "space": 64,
+
   "k_flux": 0.08,
   "k_motor": 0.20,
   "diffuse": 0.05,
   "decay": 0.05,
   "band": 3,
   "bc": "reflect",
+
   "env": {
-    "length": 512,
-    "height": 512,               // <— NEW: 2D env height (Y)
-    "frames": 1200,
+    "length": 256,
+    "height": 256,
+    "frames": 2000,
     "noise_sigma": 0.01,
     "sources": [
       {
         "kind": "moving_peak_2d",
         "amp": 1.0,
-        "speed_x": 0.0,
-        "speed_y": 0.0,
-        "width_x": 10.0,
-        "width_y": 10.0,
-        "start_x": 256,
-        "start_y": 256
+        "speed_x": 0.015,
+        "speed_y": 0.010,
+        "width_x": 6.0,
+        "width_y": 6.0,
+        "start_x": 64,
+        "start_y": 64
+      },
+      {
+        "kind": "moving_peak_2d",
+        "amp": 0.8,
+        "speed_x": -0.012,
+        "speed_y": 0.018,
+        "width_x": 8.0,
+        "width_y": 8.0,
+        "start_x": 192,
+        "start_y": 160
+      },
+      {
+        "kind": "moving_peak",
+        "amp": 0.6,
+        "speed": 0.02,
+        "width": 5.0,
+        "start": 128,
+        "y_center": "mid",
+        "width_y": 18.0
       }
     ]
   },
+
   "chunk": 150,
   "live": true
 }
