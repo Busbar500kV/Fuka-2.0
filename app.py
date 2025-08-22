@@ -1,5 +1,8 @@
 import json
 import os
+from copy import deepcopy
+from typing import Any, Dict, List
+
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
@@ -10,97 +13,122 @@ from core.engine import Engine
 # ---------- Page ----------
 st.set_page_config(page_title="Fuka 2.0 — Free‑Energy Simulation", layout="wide")
 
-# ---------- Load defaults (from file if present) ----------
-def load_defaults():
+# ---------- Load defaults ----------
+def load_defaults() -> Dict[str, Any]:
     path = "defaults.json"
     if os.path.exists(path):
         try:
-            return json.load(open(path, "r"))
+            with open(path, "r") as f:
+                data = json.load(f)
+                return data
         except Exception:
             pass
     return default_config()
 
-cfg = load_defaults()
+cfg_default: Dict[str, Any] = load_defaults()
+
+# ensure streaming helpers exist (if not provided in defaults)
+if "chunk" not in cfg_default:
+    cfg_default["chunk"] = 150
+if "live" not in cfg_default:
+    cfg_default["live"] = True
 
 # ---------- session keys ----------
-for base in ("run_id", "combo2d_count", "energy_count", "combo3d_count"):
-    if base not in st.session_state:
-        st.session_state[base] = 0
+if "run_id" not in st.session_state:
+    st.session_state["run_id"] = 0
+for base in ("combo2d", "energy", "combo3d"):
+    keyname = f"{base}_count"
+    if keyname not in st.session_state:
+        st.session_state[keyname] = 0
 
 def new_key(base: str) -> str:
+    """Unique key per draw within a run to satisfy Streamlit."""
     st.session_state[base + "_count"] += 1
     return f"{base}_{st.session_state['run_id']}_{st.session_state[base + '_count']}"
 
-# ---------- Sidebar controls ----------
-with st.sidebar:
-    st.header("Run Controls")
-    seed   = st.number_input("Seed",   0, 10_000_000, int(cfg["seed"]), 1)
-    frames = st.number_input("Frames", 200, 50_000,   int(cfg["frames"]), 200)
-    space  = st.number_input("Substrate cells (space)", 16, 1024, int(cfg["space"]), 16)
-
-    st.divider()
-    st.subheader("Physics")
-    k_flux  = st.slider("k_flux (env→substrate @ gate)", 0.0, 1.0, float(cfg["k_flux"]), 0.01)
-    k_motor = st.slider("k_motor (motor noise @ gate)",  0.0, 5.0, float(cfg["k_motor"]), 0.01)
-    diffuse = st.slider("diffuse (spread)",               0.0, 0.5, float(cfg["diffuse"]), 0.005)
-    decay   = st.slider("decay (loss)",                   0.0, 0.2, float(cfg["decay"]),   0.001)
-    band    = st.number_input("gate band half-width", 1, max(1, int(space//2)), int(cfg.get("band", 3)), 1)
-    bc      = st.selectbox("Boundary condition",
-                           options=["reflect","periodic","absorb","wall"],
-                           index=["reflect","periodic","absorb","wall"].index(cfg.get("bc","reflect")))
-    gate_center = st.slider("gate_center (index)", 0, int(space)-1,
-                            value=int(cfg.get("gate_center", space//2)), step=1)
-
-    st.divider()
-    st.subheader("Environment")
-    # NEW: env height for 2D
-    env_height = st.number_input("Env height (y)", 1, 1024, int(cfg["env"].get("height", 1)), 1)
-    env_len    = st.number_input("Env length (x)", min_value=int(space), max_value=4096,
-                                 value=int(cfg["env"]["length"]), step=int(space))
-    env_noise  = st.slider("Env noise σ", 0.0, 0.2, float(cfg["env"]["noise_sigma"]), 0.005)
-
-    st.caption("Sources JSON (1D or 2D). Examples:\n"
-               '1D: {"kind":"moving_peak","amp":1,"speed":0.0,"width":4,"start":100}\n'
-               '2D: {"kind":"moving_peak_2d","amp":1,"speed_x":0.0,"speed_y":0.0,"width_x":6,"width_y":6,"start_x":256,"start_y":256}')
-    default_sources = json.dumps(cfg["env"]["sources"], indent=2)
-    sources_text = st.text_area("env.sources JSON", value=default_sources, height=220)
+# ---------- Dynamic UI builders ----------
+def _num_step(v: float | int) -> float:
+    """Heuristic step for number_input."""
     try:
-        sources = json.loads(sources_text)
-        st.success("Sources OK")
+        mag = abs(float(v))
+        if mag >= 1000: return 100.0
+        if mag >= 100:  return 10.0
+        if mag >= 10:   return 1.0
+        if mag >= 1:    return 0.1
+        if mag > 0:     return 0.01
+    except Exception:
+        pass
+    return 1.0
+
+def render_scalar(label: str, value: Any) -> Any:
+    """Render a scalar control based on type; return possibly updated value."""
+    if isinstance(value, bool):
+        return st.checkbox(label, value=value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        step = int(max(1, round(_num_step(value))))
+        # very forgiving limits to avoid BelowMin errors when defaults change
+        return st.number_input(label, value=int(value), step=step, min_value=-1_000_000_000, max_value=1_000_000_000)
+    if isinstance(value, float):
+        step = _num_step(value)
+        return st.number_input(label, value=float(value), step=step, min_value=-1e9, max_value=1e9, format="%.6f")
+    if isinstance(value, str):
+        # small convenience: if looks like BC enum, use a selectbox
+        enum = ["reflect","periodic","absorb","wall"]
+        if value in enum:
+            return st.selectbox(label, options=enum, index=enum.index(value))
+        return st.text_input(label, value=value)
+    # Fallback: JSON editor for unknown scalars
+    txt = st.text_area(label + " (as JSON)", value=json.dumps(value, indent=2), height=120)
+    try:
+        return json.loads(txt)
+    except Exception:
+        st.warning(f"Invalid JSON for {label}; keeping previous value.")
+        return value
+
+def render_list(label: str, lst: List[Any]) -> List[Any]:
+    """
+    Lists can be arbitrary (e.g., env.sources). We present as JSON for full flexibility.
+    """
+    txt = st.text_area(label + " (JSON list)", value=json.dumps(lst, indent=2), height=220)
+    try:
+        parsed = json.loads(txt)
+        if not isinstance(parsed, list):
+            st.error(f"{label} must be a JSON list; keeping previous value.")
+            return lst
+        return parsed
     except Exception as e:
-        sources = cfg["env"]["sources"]
-        st.error(f"Sources JSON error: {e}")
+        st.error(f"{label} JSON error: {e}; keeping previous value.")
+        return lst
 
-    st.divider()
-    st.subheader("Streaming")
-    chunk = st.slider("Update chunk (frames per UI update)", 10, 500, int(cfg.get("chunk",150)), 10)
-    live  = st.toggle("Live streaming", value=bool(cfg.get("live", True)))
+def render_object(title: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Recursively render a dict into widgets. Returns a NEW dict with updated values.
+    Special-case: if a key name looks like 'sources' and value is a list, always JSON-edit it.
+    """
+    st.subheader(title)
+    out: Dict[str, Any] = {}
+    for k, v in data.items():
+        label = f"{title}.{k}" if title else k
 
-    st.divider()
-    st.subheader("3‑D view")
-    thr3d = st.slider("3‑D energy threshold (0‑1)", 0.0, 1.0, 0.75, 0.01)
-    max3d = st.number_input("3‑D max points", 1_000, 200_000, 40_000, 1_000)
+        # Group well-known nested objects with a nice header
+        if isinstance(v, dict):
+            with st.expander(k, expanded=True):
+                out[k] = render_object(k, v)
+        elif isinstance(v, list):
+            # Special-case for 'sources' (or any list): JSON editor for full freedom
+            out[k] = render_list(k, v)
+        else:
+            out[k] = render_scalar(k, v)
+    return out
 
-# ---------- Build config dict ----------
-user_cfg = {
-    "seed": int(seed),
-    "frames": int(frames),
-    "space": int(space),
-    "k_flux": float(k_flux),
-    "k_motor": float(k_motor),
-    "diffuse": float(diffuse),
-    "decay": float(decay),
-    "band": int(band),
-    "bc": bc,
-    "gate_center": int(gate_center),
-    "env": {
-        "height": int(env_height),                   # NEW
-        "length": int(env_len),
-        "frames": int(frames),
-        "noise_sigma": float(env_noise),
-        "sources": sources,
-    },
-}
+# ---------- Sidebar: fully dynamic from defaults ----------
+with st.sidebar:
+    st.header("Configuration (auto‑generated)")
+    user_cfg = render_object("", deepcopy(cfg_default))
+
+# Pull out streaming knobs for app behavior (not part of Engine Config)
+chunk = int(user_cfg.pop("chunk", 150))
+live  = bool(user_cfg.pop("live", True))
 
 # ---------- Layout placeholders ----------
 st.title("Simulation")
@@ -126,31 +154,22 @@ def _resample_rows(M: np.ndarray, new_len: int) -> np.ndarray:
         out[t] = np.interp(x_tgt, x_src, M[t])
     return out
 
-def _project_tx(E: np.ndarray) -> np.ndarray:
-    """
-    Ensure a (T, X) array for the 2D combined heatmap.
-    - If E is (T, X): return as is.
-    - If E is (T, Y, X): return max over Y -> (T, X).
-    """
-    if E.ndim == 2:
-        return E
-    if E.ndim == 3:
-        return np.max(E, axis=1)  # (T, X)
-    raise ValueError(f"Unexpected env/substrate shape: {E.shape}")
-
 def draw_combined_heatmap(ph, E: np.ndarray, S: np.ndarray, title="Env + Substrate (combined, zoomable)"):
-    # For the 2D case, project both to (T, X) via max-over-Y so we can overlay them in a single heatmap.
-    E_tx = _project_tx(E)
-    S_tx = _project_tx(S)
-
-    # Resample substrate to env width so x-axis matches
-    if S_tx.shape[1] != E_tx.shape[1]:
-        S_res = _resample_rows(S_tx, E_tx.shape[1])
+    # Handles 1‑D (T,X). If you feed 2‑D (T,Y,X), take mean over Y to keep a single x‑axis.
+    if E.ndim == 3:
+        E2 = E.mean(axis=1)
     else:
-        S_res = S_tx
+        E2 = E
+    if S.ndim == 3:
+        S2 = S.mean(axis=1)
+    else:
+        S2 = S
 
-    En = _norm(E_tx)
-    Sn = _norm(S_res)
+    if S2.shape[1] != E2.shape[1]:
+        S2 = _resample_rows(S2, E2.shape[1])
+
+    En = _norm(E2)
+    Sn = _norm(S2)
 
     fig = go.Figure()
     fig.add_trace(go.Heatmap(z=En, coloraxis="coloraxis", zsmooth=False, name="Env"))
@@ -164,7 +183,8 @@ def draw_combined_heatmap(ph, E: np.ndarray, S: np.ndarray, title="Env + Substra
         height=620,
         template="plotly_dark",
     )
-    ph.plotly_chart(fig, use_container_width=True, theme=None, key=new_key("combo2d"))
+    combo_key = new_key("combo2d")
+    ph.plotly_chart(fig, use_container_width=True, theme=None, key=combo_key)
 
 def draw_energy_timeseries(ph, t, e_cell, e_env, e_flux, title="Energy vs time"):
     fig = go.Figure()
@@ -172,79 +192,71 @@ def draw_energy_timeseries(ph, t, e_cell, e_env, e_flux, title="Energy vs time")
     fig.add_trace(go.Scatter(x=t, y=e_env,  name="E_env"))
     fig.add_trace(go.Scatter(x=t, y=e_flux, name="E_flux"))
     fig.update_layout(xaxis_title="t (frames)", yaxis_title="energy", title=title, height=380, template="plotly_dark")
-    ph.plotly_chart(fig, use_container_width=True, theme=None, key=new_key("energy"))
+    energy_key = new_key("energy")
+    ph.plotly_chart(fig, use_container_width=True, theme=None, key=energy_key)
 
-def draw_sparse_3d(ph, E: np.ndarray, S: np.ndarray, thr: float, max_points: int):
-    """
-    1D case  : E,S are (T, X) -> plot markers at y=0 (env) and y=1 (substrate)
-    2D case  : E,S are (T, Y, X) -> plot true spatial y; env and substrate differ by color.
-    """
-    def _sub(x, y, z, vmax):
-        n = len(x)
-        if n <= vmax: 
-            return x, y, z
-        idx = np.random.choice(n, size=vmax, replace=False)
-        return x[idx], y[idx], z[idx]
-
-    if E.ndim == 2:  # 1D
-        En = _norm(E)
-        Sn = _norm(S if S.ndim == 2 else np.max(S, axis=1))  # safety
-        tE, xE = np.where(En >= thr); yE = np.zeros_like(tE)
-        tS, xS = np.where(Sn >= thr); yS = np.ones_like(tS)
-
-        xE, yE, zE = _sub(xE, yE, tE, max_points//2)
-        xS, yS, zS = _sub(xS, yS, tS, max_points//2)
-
-        fig = go.Figure()
-        fig.add_trace(go.Scatter3d(x=xE, y=yE, z=zE, mode="markers",
-                                   marker=dict(size=2), name="Env"))
-        fig.add_trace(go.Scatter3d(x=xS, y=yS, z=zS, mode="markers",
-                                   marker=dict(size=2), name="Substrate"))
-
-        scene = dict(xaxis_title="x (space)", yaxis_title="layer", zaxis_title="t (time)")
-
-    else:            # 2D
-        # true 3D points (x,y,t)
+def draw_sparse_3d(ph, E: np.ndarray, S: np.ndarray, thr: float = 0.75, max_points: int = 40_000):
+    # If 2‑D (T,Y,X), keep points over Y and color by source (Env/Sub)
+    if E.ndim == 3:
+        En = _norm(E)   # (T,Y,X)
+        Sn = _norm(S)   # (T,Y,X) expected
+        t_idx_E, y_idx_E, x_idx_E = np.where(En >= thr)
+        t_idx_S, y_idx_S, x_idx_S = np.where(Sn >= thr)
+        xE, yE, zE = x_idx_E, y_idx_E, t_idx_E
+        xS, yS, zS = x_idx_S, y_idx_S, t_idx_S
+    else:
+        # 1‑D fallback (T,X) → put env at y=0, subs at y=1
         En = _norm(E)
         Sn = _norm(S)
-        tE, yE, xE = np.where(En >= thr)
-        tS, yS, xS = np.where(Sn >= thr)
+        t_idx_E, x_idx_E = np.where(En >= thr)
+        t_idx_S, x_idx_S = np.where(Sn >= thr)
+        xE, yE, zE = x_idx_E, np.zeros_like(x_idx_E), t_idx_E
+        xS, yS, zS = x_idx_S, np.ones_like(x_idx_S),  t_idx_S
 
-        max_half = max_points // 2
-        xE, yE, zE = _sub(xE, yE, tE, max_half)
-        xS, yS, zS = _sub(xS, yS, tS, max_half)
+    def _sub(x, y, z, vmax):
+        n = len(x)
+        if n > vmax:
+            idx = np.random.choice(n, size=vmax, replace=False)
+            return x[idx], y[idx], z[idx]
+        return x, y, z
 
-        fig = go.Figure()
-        fig.add_trace(go.Scatter3d(
-            x=xE, y=yE, z=zE, mode="markers",
-            marker=dict(size=2, opacity=0.5), name="Env"
-        ))
-        fig.add_trace(go.Scatter3d(
-            x=xS, y=yS, z=zS, mode="markers",
-            marker=dict(size=2, opacity=0.8), name="Substrate"
-        ))
+    xE, yE, zE = _sub(xE, yE, zE, max_points // 2)
+    xS, yS, zS = _sub(xS, yS, zS, max_points // 2)
 
-        scene = dict(xaxis_title="x (space)", yaxis_title="y (space)", zaxis_title="t (time)")
-
+    fig = go.Figure()
+    fig.add_trace(go.Scatter3d(x=xE, y=yE, z=zE, mode="markers",
+                               marker=dict(size=2, opacity=0.7), name="Env"))
+    fig.add_trace(go.Scatter3d(x=xS, y=yS, z=zS, mode="markers",
+                               marker=dict(size=2, opacity=0.7), name="Substrate"))
     fig.update_layout(
         title="Sparse 3‑D energy",
-        scene=scene,
+        scene=dict(
+            xaxis_title="x",
+            yaxis_title="y" if E.ndim == 3 else "layer",
+            zaxis_title="t",
+        ),
         height=640,
         template="plotly_dark",
         showlegend=True,
     )
-    ph.plotly_chart(fig, use_container_width=True, theme=None, key=new_key("combo3d"))
+    key3d = new_key("combo3d")
+    ph.plotly_chart(fig, use_container_width=True, theme=None, key=key3d)
 
 # ---------- Run ----------
 if st.button("Run / Rerun", use_container_width=True):
     # new run: bump run id and reset per‑run counters
     st.session_state["run_id"] += 1
-    st.session_state["combo2d_count"] = 0
-    st.session_state["energy_count"]  = 0
-    st.session_state["combo3d_count"] = 0
+    for base in ("combo2d", "energy", "combo3d"):
+        st.session_state[f"{base}_count"] = 0
 
+    # Build typed Config for engine from the dynamic dict
     ecfg = make_config_from_dict(user_cfg)
     engine = Engine(ecfg)
+
+    # 3‑D sliders (only shown here to keep UI dynamic)
+    st.sidebar.subheader("3‑D (sparse) view")
+    thr3d = st.sidebar.slider("3‑D energy threshold (0‑1)", 0.0, 1.0, 0.75, 0.01)
+    max3d = st.sidebar.number_input("3‑D max points", 1_000, 200_000, 40_000, 1_000)
 
     def redraw(upto: int, final: bool = False):
         draw_combined_heatmap(combo2d_ph, engine.env[:upto+1], engine.S[:upto+1])
