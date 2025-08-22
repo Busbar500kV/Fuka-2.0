@@ -2,29 +2,68 @@
 from __future__ import annotations
 import json, os
 from copy import deepcopy
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, List
 
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
-from core.config import default_config, make_config_from_dict
+from core.config import make_config_from_dict
 from core.engine import Engine
 
 # ---------- Page ----------
 st.set_page_config(page_title="Fuka 2.0 — Free‑Energy Simulation", layout="wide")
 
-# ---------- Load defaults (from file if present) ----------
-def load_defaults() -> Dict[str, Any]:
-    path = "defaults.json"
-    if os.path.exists(path):
-        try:
-            return json.load(open(path, "r"))
-        except Exception:
-            pass
-    return default_config()
 
-cfg_default = load_defaults()
+# ---------- Strict defaults loading (no silent fallback) ----------
+def load_defaults_strict(path: str = "defaults.json") -> Dict[str, Any]:
+    if not os.path.exists(path):
+        st.error(
+            "defaults.json not found in project root. "
+            "Create it (copy from README/template) and remove any comments."
+        )
+        st.stop()
+    try:
+        with open(path, "r") as f:
+            return json.load(f)  # strict JSON (no // or /* */ comments)
+    except Exception as e:
+        st.error(
+            f"Failed to parse defaults.json as strict JSON.\n\n"
+            f"Tip: remove any // or /* */ comments.\n\n"
+            f"Parser error: {e}"
+        )
+        st.stop()
+
+
+# ---------- Minimal schema validation ----------
+def find_missing(cfg: Dict[str, Any]) -> List[str]:
+    # required top-level keys for the simulation engine
+    req_top = ["seed", "frames", "space", "k_flux", "k_motor", "diffuse", "decay", "band", "bc", "env"]
+    missing: List[str] = [k for k in req_top if k not in cfg]
+
+    # env sub-keys that Engine/build_env depends on
+    if "env" not in cfg or not isinstance(cfg["env"], dict):
+        missing.append("env.length")
+        missing.append("env.frames")
+        missing.append("env.noise_sigma")
+    else:
+        env = cfg["env"]
+        for k in ["length", "frames", "noise_sigma"]:
+            if k not in env:
+                missing.append(f"env.{k}")
+
+    return missing
+
+
+cfg_default = load_defaults_strict()
+missing_keys = find_missing(cfg_default)
+if missing_keys:
+    st.error(
+        "defaults.json is missing required keys for the simulation. "
+        "Please add the following keys and rerun:\n\n"
+        + "\n".join(f"• {k}" for k in missing_keys)
+    )
+    st.stop()
 
 # ---------- session keys for plot uniqueness ----------
 for base in ("combo2d_count", "energy_count", "combo3d_count", "run_id"):
@@ -34,6 +73,7 @@ for base in ("combo2d_count", "energy_count", "combo3d_count", "run_id"):
 def new_key(base: str) -> str:
     st.session_state[base + "_count"] += 1
     return f"{base}_{st.session_state['run_id']}_{st.session_state[base + '_count']}"
+
 
 # ---------- Numeric UI helpers (sliders) ----------
 def _num_step(v: float) -> float:
@@ -80,6 +120,7 @@ def _int_slider_bounds(label: str, val: int) -> Tuple[int, int, int]:
         lo, hi = -max(10, m * 10), max(10, m * 10)
     return lo, hi, 1
 
+
 # ---------- Dynamic sidebar renderers (SLIDERS for numbers) ----------
 def render_scalar(label: str, value: Any, path: str):
     key = f"w:{path}"
@@ -125,30 +166,52 @@ def render_object(label: str, obj: Dict[str, Any], path: str = "") -> Dict[str, 
             out[k] = render_scalar(k, v, path=child_path)
     return out
 
-# ---------- Sidebar: fully dynamic from defaults ----------
+
+# ---------- Sidebar: render exactly what's in defaults.json ----------
 with st.sidebar:
-    st.header("Configuration (auto‑generated)")
+    st.header("Configuration (from defaults.json)")
     user_cfg = render_object("", deepcopy(cfg_default))
 
-# Pull out streaming & 3D knobs (if present) so they don't go into Engine Config
-chunk = int(user_cfg.pop("chunk", cfg_default.get("chunk", 150)))
-live  = bool(user_cfg.pop("live",  cfg_default.get("live",  True)))
-thr3d = float(user_cfg.pop("thr3d", cfg_default.get("thr3d", 0.75)))
-max3d = int(user_cfg.pop("max3d",  cfg_default.get("max3d",  40_000)))
+# Pull out optional UI knobs (present only if in defaults.json)
+# If missing, we WARN and the feature is disabled (no hardcoded injection).
+had_live  = "live"  in user_cfg
+had_chunk = "chunk" in user_cfg
+had_thr3d = "thr3d" in user_cfg
+had_max3d = "max3d" in user_cfg
+had_vis   = "vis"   in user_cfg
 
-# Pull out visual knobs for 2‑D combined heatmap
-_vis_default = cfg_default.get("vis", {})
-vis = user_cfg.pop("vis", _vis_default)
-heat_floor  = float(vis.get("heat_floor", 0.10))
-heat_gamma  = float(vis.get("heat_gamma", 1.0))
-env_opacity = float(vis.get("env_opacity", 1.0))
-sub_opacity = float(vis.get("sub_opacity", 0.85))
+live  = bool(user_cfg.pop("live",  True))   if had_live  else None
+chunk = int(user_cfg.pop("chunk",  150))    if had_chunk else None
+thr3d = float(user_cfg.pop("thr3d", 0.75))  if had_thr3d else None
+max3d = int(user_cfg.pop("max3d",  40000))  if had_max3d else None
+vis   = user_cfg.pop("vis", {})             if had_vis   else None
+
+if not had_live or not had_chunk:
+    st.sidebar.warning("Optional streaming controls ('live', 'chunk') not found in defaults.json. "
+                       "Add them to control streaming behavior via UI.")
+
+if not had_thr3d or not had_max3d:
+    st.sidebar.warning("Optional 3‑D controls ('thr3d', 'max3d') not found in defaults.json. "
+                       "3‑D view will be disabled unless you add them.")
+
+# Visual knobs for 2‑D heatmap
+if vis is None:
+    st.sidebar.warning("Optional 'vis' block not found in defaults.json. "
+                       "Heatmap visibility controls (heat_floor, heat_gamma, env_opacity, sub_opacity) will be defaulted in code.")
+    heat_floor, heat_gamma, env_opacity, sub_opacity = 0.10, 1.0, 1.0, 0.85
+else:
+    heat_floor  = float(vis.get("heat_floor", 0.10))
+    heat_gamma  = float(vis.get("heat_gamma", 1.0))
+    env_opacity = float(vis.get("env_opacity", 1.0))
+    sub_opacity = float(vis.get("sub_opacity", 0.85))
+
 
 # ---------- Layout placeholders ----------
 st.title("Simulation")
 combo2d_ph = st.empty()
 energy_ph  = st.empty()
 plot3d_ph  = st.empty()
+
 
 # ---------- Plot helpers ----------
 def _norm(A: np.ndarray) -> np.ndarray:
@@ -159,7 +222,6 @@ def _norm(A: np.ndarray) -> np.ndarray:
     return (A - m) / (M - m + 1e-12)
 
 def _apply_floor_gamma(Z: np.ndarray, floor: float, gamma: float) -> np.ndarray:
-    """Apply optional gamma, then floor to NaN for better visibility."""
     Z = np.clip(Z, 0.0, 1.0)
     if gamma != 1.0:
         Z = Z ** float(gamma)
@@ -179,7 +241,7 @@ def _resample_rows(M: np.ndarray, new_len: int) -> np.ndarray:
     return out
 
 def draw_combined_heatmap(ph, E: np.ndarray, S: np.ndarray, title="Env + Substrate (combined, zoomable)"):
-    # Keep this panel simple: if 3D, show first y-slice
+    # If 3D env/substrate, show first y-slice in this 2D panel
     if E.ndim == 3:
         E = E[:, 0, :]
     if S.ndim == 3:
@@ -291,6 +353,7 @@ def draw_sparse_3d(ph, E: np.ndarray, S: np.ndarray, thr: float, max_points: int
     )
     ph.plotly_chart(fig, use_container_width=True, theme=None, key=new_key("combo3d"))
 
+
 # ---------- Run ----------
 if st.button("Run / Rerun", use_container_width=True):
     # new run: bump ids so plot keys are unique every run
@@ -305,11 +368,14 @@ if st.button("Run / Rerun", use_container_width=True):
     def redraw(upto: int, final: bool = False):
         draw_combined_heatmap(combo2d_ph, engine.env[:upto+1], engine.S[:upto+1])
         draw_energy_timeseries(energy_ph, engine.hist.t, engine.hist.E_cell, engine.hist.E_env, engine.hist.E_flux)
-        if final:
+        # 3D view only if optional knobs were provided
+        if final and (thr3d is not None) and (max3d is not None):
             draw_sparse_3d(plot3d_ph, engine.env, engine.S, thr=float(thr3d), max_points=int(max3d))
+        elif final and (thr3d is None or max3d is None):
+            st.warning("3‑D view disabled: add 'thr3d' and 'max3d' to defaults.json to enable.")
 
-    # Use the sidebar-selected 'live' and 'chunk'
-    if live:
+    # Streaming only if optional knobs were provided
+    if (live is not None) and (chunk is not None) and live:
         last = [-1]
         def cb(t: int):
             if t - last[0] >= int(chunk) or t == engine.T - 1:
@@ -317,5 +383,7 @@ if st.button("Run / Rerun", use_container_width=True):
                 redraw(t, final=(t == engine.T - 1))
         engine.run(progress_cb=cb)
     else:
+        if live is None or chunk is None:
+            st.info("Streaming disabled: add 'live' and 'chunk' to defaults.json to enable live updates.")
         engine.run(progress_cb=None)
         redraw(engine.T - 1, final=True)
