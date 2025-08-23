@@ -73,6 +73,37 @@ class Engine:
         # Precompute physics kwargs from defaults.json (if any)
         self._phys_kwargs = dict(self.cfg.physics or {})
 
+    # ---------- telemetry helpers ----------
+    @staticmethod
+    def _entropy_from_array(arr: np.ndarray) -> float:
+        """
+        Shannon entropy of a nonnegative distribution derived from arr.
+        We shift to make nonnegative and normalize; if sum=0 -> entropy 0.
+        """
+        flat = arr.ravel().astype(float)
+        flat = flat - np.min(flat)
+        flat = np.clip(flat, 0.0, None)
+        s = float(np.sum(flat))
+        if s <= 0.0 or not np.isfinite(s):
+            return 0.0
+        p = flat / (s + 1e-12)
+        return float(-np.sum(p * np.log(p + 1e-12)))
+
+    def _record_metrics(self, t: int, cur: np.ndarray, env_slice: np.ndarray, flux_metric: float) -> None:
+        # always-present series
+        self.hist.t.append(t)
+        self.hist.E_cell.append(float(np.mean(cur)))
+        self.hist.E_env.append(float(np.mean(env_slice)))
+        self.hist.E_flux.append(float(flux_metric))
+
+        # optional series (only if fields exist in History; keeps backward-compat)
+        if hasattr(self.hist, "variance"):
+            self.hist.variance.append(float(np.var(cur)))
+        if hasattr(self.hist, "total_mass"):
+            self.hist.total_mass.append(float(np.sum(cur)))
+        if hasattr(self.hist, "entropy"):
+            self.hist.entropy.append(self._entropy_from_array(cur))
+
     # ---------- steps ----------
     def _step_1d(self, t: int):
         # env row -> resample to substrate width
@@ -96,10 +127,7 @@ class Engine:
         self.S[t] = cur
 
         # telemetry
-        self.hist.t.append(t)
-        self.hist.E_cell.append(float(np.mean(cur)))
-        self.hist.E_env.append(float(np.mean(e_row)))
-        self.hist.E_flux.append(float(flux))
+        self._record_metrics(t, cur=cur, env_slice=e_row, flux_metric=flux)
 
     def _step_2d(self, t: int):
         # env frame (Y_env, X_env) -> resample to (Y, X)
@@ -131,10 +159,7 @@ class Engine:
         self.S[t] = cur
 
         # telemetry
-        self.hist.t.append(t)
-        self.hist.E_cell.append(float(np.mean(cur)))
-        self.hist.E_env.append(float(np.mean(E_t_rs)))
-        self.hist.E_flux.append(float(flux))
+        self._record_metrics(t, cur=cur, env_slice=E_t_rs, flux_metric=flux)
 
     def step(self, t: int):
         if self.mode == "1d":
