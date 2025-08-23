@@ -179,12 +179,14 @@ had_chunk = "chunk" in user_cfg
 had_thr3d = "thr3d" in user_cfg
 had_max3d = "max3d" in user_cfg
 had_vis   = "vis"   in user_cfg
+had_tel   = "telemetry" in user_cfg  # <- NEW optional block for plotting extras
 
 live  = bool(user_cfg.pop("live",  True))   if had_live  else None
 chunk = int(user_cfg.pop("chunk",  150))    if had_chunk else None
 thr3d = float(user_cfg.pop("thr3d", 0.75))  if had_thr3d else None
 max3d = int(user_cfg.pop("max3d",  40000))  if had_max3d else None
 vis   = user_cfg.pop("vis", {})             if had_vis   else None
+telemetry = user_cfg.pop("telemetry", {})   if had_tel   else None  # e.g. {"show_entropy":true,...}
 
 if not had_live or not had_chunk:
     st.sidebar.warning("Optional streaming controls ('live', 'chunk') not found in defaults.json. "
@@ -193,6 +195,10 @@ if not had_live or not had_chunk:
 if not had_thr3d or not had_max3d:
     st.sidebar.warning("Optional 3‑D controls ('thr3d', 'max3d') not found in defaults.json. "
                        "3‑D view will be disabled unless you add them.")
+
+if not had_tel:
+    st.sidebar.info("Optional 'telemetry' block not found in defaults.json. "
+                    "Add it to toggle plotting of 'entropy', 'variance', and 'total_mass' if available.")
 
 # Visual knobs for 2‑D heatmap
 if vis is None:
@@ -204,6 +210,11 @@ else:
     heat_gamma  = float(vis.get("heat_gamma", 1.0))
     env_opacity = float(vis.get("env_opacity", 1.0))
     sub_opacity = float(vis.get("sub_opacity", 0.85))
+
+# Telemetry toggles (only honored if the series exist at runtime)
+show_entropy    = bool(telemetry.get("show_entropy", True))     if telemetry is not None else False
+show_variance   = bool(telemetry.get("show_variance", False))   if telemetry is not None else False
+show_total_mass = bool(telemetry.get("show_total_mass", False)) if telemetry is not None else False
 
 
 # ---------- Layout placeholders ----------
@@ -269,16 +280,34 @@ def draw_combined_heatmap(ph, E: np.ndarray, S: np.ndarray, title="Env + Substra
     )
     ph.plotly_chart(fig, use_container_width=True, theme=None, key=new_key("combo2d"))
 
-def draw_energy_timeseries(ph, t, e_cell, e_env, e_flux, title="Energy vs time"):
+def draw_energy_timeseries(
+    ph,
+    hist,
+    title="Energy vs time",
+    show_entropy=False,
+    show_variance=False,
+    show_total_mass=False,
+):
+    t = hist.t
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=t, y=e_cell, name="E_cell"))
-    fig.add_trace(go.Scatter(x=t, y=e_env,  name="E_env"))
-    fig.add_trace(go.Scatter(x=t, y=e_flux, name="E_flux"))
+    # Always-available series
+    fig.add_trace(go.Scatter(x=t, y=hist.E_cell, name="E_cell"))
+    fig.add_trace(go.Scatter(x=t, y=hist.E_env,  name="E_env"))
+    fig.add_trace(go.Scatter(x=t, y=hist.E_flux, name="E_flux"))
+
+    # Optional series (only if toggled AND data present)
+    if show_entropy and getattr(hist, "entropy", None):
+        fig.add_trace(go.Scatter(x=t, y=hist.entropy, name="entropy", line=dict(dash="dot")))
+    if show_variance and getattr(hist, "variance", None):
+        fig.add_trace(go.Scatter(x=t, y=hist.variance, name="variance", line=dict(dash="dash")))
+    if show_total_mass and getattr(hist, "total_mass", None):
+        fig.add_trace(go.Scatter(x=t, y=hist.total_mass, name="total_mass", line=dict(dash="dashdot")))
+
     fig.update_layout(
         xaxis_title="t (frames)",
-        yaxis_title="energy",
+        yaxis_title="value",
         title=title,
-        height=380,
+        height=420,
         template="plotly_dark",
     )
     ph.plotly_chart(fig, use_container_width=True, theme=None, key=new_key("energy"))
@@ -367,7 +396,16 @@ if st.button("Run / Rerun", use_container_width=True):
 
     def redraw(upto: int, final: bool = False):
         draw_combined_heatmap(combo2d_ph, engine.env[:upto+1], engine.S[:upto+1])
-        draw_energy_timeseries(energy_ph, engine.hist.t, engine.hist.E_cell, engine.hist.E_env, engine.hist.E_flux)
+
+        # Energy + optional telemetry (only if toggled AND data exist)
+        draw_energy_timeseries(
+            energy_ph,
+            engine.hist,
+            show_entropy=show_entropy and bool(getattr(engine.hist, "entropy", [])),
+            show_variance=show_variance and bool(getattr(engine.hist, "variance", [])),
+            show_total_mass=show_total_mass and bool(getattr(engine.hist, "total_mass", [])),
+        )
+
         # 3D view only if optional knobs were provided
         if final and (thr3d is not None) and (max3d is not None):
             draw_sparse_3d(plot3d_ph, engine.env, engine.S, thr=float(thr3d), max_points=int(max3d))
