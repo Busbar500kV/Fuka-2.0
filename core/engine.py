@@ -16,7 +16,7 @@ def _resample_2d(frame: np.ndarray, new_y: int, new_x: int) -> np.ndarray:
     if (Y0, X0) == (new_y, new_x):
         return frame
 
-    # interp along X for each row
+    # interp along X for each row -> (Y0, new_x)
     if X0 != new_x:
         x_src = np.linspace(0.0, 1.0, X0)
         x_tgt = np.linspace(0.0, 1.0, new_x)
@@ -26,7 +26,7 @@ def _resample_2d(frame: np.ndarray, new_y: int, new_x: int) -> np.ndarray:
     else:
         tmp = frame
 
-    # interp along Y for each column
+    # interp along Y for each column -> (new_y, new_x)
     if Y0 != new_y:
         y_src = np.linspace(0.0, 1.0, Y0)
         y_tgt = np.linspace(0.0, 1.0, new_y)
@@ -70,6 +70,13 @@ class Engine:
 
         self.hist = History()
 
+        # Prepare optional physics kwargs (only passed if present on cfg)
+        self._phys_kwargs = {}
+        for k in ("alpha_speed", "beta_speed", "flux_limit", "T",
+                  "update_mode", "boundary_leak"):
+            if hasattr(self.cfg, k):
+                self._phys_kwargs[k] = getattr(self.cfg, k)
+
     # ---------- steps ----------
     def _step_1d(self, t: int):
         # env row -> resample to substrate width
@@ -87,6 +94,7 @@ class Engine:
             rng=self.rng,
             band=self.cfg.band,
             bc=self.cfg.bc,
+            **self._phys_kwargs,   # <- causal/conservative extras (if any)
         )
         # cur is (X,)
         self.S[t] = cur
@@ -108,15 +116,16 @@ class Engine:
             env_row=E_t_rs,          # (Y, X)
             k_flux=self.cfg.k_flux,
             k_motor=self.cfg.k_motor,
-            diffuse=self.cfg.diffuse,
+            diffuse=self.cfg.diffuse,   # now acts as per‑tick exchange cap
             decay=self.cfg.decay,
             rng=self.rng,
-            band=self.cfg.band,      # accepted by step_physics (ignored in emergent mode)
+            band=self.cfg.band,         # accepted by step_physics (ignored in emergent mode)
             bc=self.cfg.bc,
+            **self._phys_kwargs,        # <- causal/conservative extras (if any)
         )
 
-        # --- compatibility shim: if some physics impl returns (2, Y, X) stack, take channel 0
-        if cur.ndim == 3 and cur.shape[0] == 2 and cur.shape[1:] == (self.Y, self.X):
+        # --- compatibility shim: if a physics impl ever returns stacked channels, take first
+        if cur.ndim == 3 and cur.shape[1:] == (self.Y, self.X):
             cur = cur[0]
 
         # Sanity: ensure we got exactly (Y, X)
