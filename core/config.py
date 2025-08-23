@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict, field
 from typing import List, Dict, Any
 
-# ---- Environment (can be 1D or 2D via height) ----
+# ---- Environment (1D if height==1; 2D if height>1) ----
 @dataclass
 class FieldCfg:
     length: int = 512
@@ -21,7 +21,7 @@ class Config:
     frames: int = 5000
     space: int = 64
 
-    # “classic” knobs (still supported)
+    # Classic knobs (still supported explicitly)
     k_flux: float = 0.05
     k_motor: float = 0.20
     diffuse: float = 0.05
@@ -29,18 +29,27 @@ class Config:
     band: int = 3
     bc: str = "reflect"  # "periodic" | "reflect" | "absorb" | "wall"
 
-    # NEW: anything extra the physics step understands will live here
+    # Any extra physics parameters are passed verbatim to step_physics
     physics: Dict[str, Any] = field(default_factory=dict)
 
     env: FieldCfg = field(default_factory=FieldCfg)
 
 def default_config() -> Dict[str, Any]:
-    """Conservative baseline; the app runs strict off defaults.json anyway."""
+    """
+    Conservative baseline (unused when the app runs strictly from defaults.json).
+    Provided so other entry points/tests can still import a sane default dict.
+    """
     return asdict(Config())
 
-# Known physics knobs we’ll hoover up from either a "physics" block or top-level:
+# Hints for physics keys that may appear at top-level in defaults.json
+# (We hoover them into the physics dict for backward compatibility.)
 _PHYS_HINTS = {
-    "alpha_speed", "beta_speed", "flux_limit", "T", "update_mode", "boundary_leak"
+    "alpha_speed",
+    "beta_speed",
+    "flux_limit",
+    "T",
+    "update_mode",
+    "boundary_leak",
 }
 
 def make_config_from_dict(d: Dict[str, Any]) -> Config:
@@ -62,7 +71,7 @@ def make_config_from_dict(d: Dict[str, Any]) -> Config:
 
     # ---- collect physics kwargs ----
     physics_block = dict(d.get("physics", {}))  # optional nested block
-    # also sweep top-level for hinted keys (like your current defaults.json)
+    # also sweep top-level for hinted keys (legacy/back-compat)
     for k in _PHYS_HINTS:
         if k in d and k not in physics_block:
             physics_block[k] = d[k]
@@ -77,6 +86,6 @@ def make_config_from_dict(d: Dict[str, Any]) -> Config:
         decay=float(d.get("decay", 0.01)),
         band=int(d.get("band", 3)),
         bc=bc,
-        physics=physics_block,  # <- passed through by Engine to step_physics
+        physics=physics_block,  # <- Engine forwards this to step_physics(**physics)
         env=fcfg,
     )
