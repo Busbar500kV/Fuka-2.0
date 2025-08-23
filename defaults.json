@@ -56,8 +56,13 @@
 
   "vis": {
     "heat_floor": 0.10,
-        "heat_gamma": 1.0,
+    "heat_gamma": 1.0,
     "env_opacity": 1.0,
     "sub_opacity": 0.85
-  }
+  },
+
+  "alpha_speed": 0.90,
+  "beta_speed": 1.00,
+  "flux_limit": 0.20,
+  "boundary_leak": 0.01
 }
