@@ -87,7 +87,8 @@ class Engine:
             rng=self.rng,
             band=self.cfg.band,
             bc=self.cfg.bc,
-            **(self.cfg.physics or {}),   # <-- forward extra physics kwargs
+            # >>> pass through any extra physics knobs from defaults.json
+            **(self.cfg.physics or {}),
         )
         # cur is (X,)
         self.S[t] = cur
@@ -112,9 +113,10 @@ class Engine:
             diffuse=self.cfg.diffuse,
             decay=self.cfg.decay,
             rng=self.rng,
-            band=self.cfg.band,      # accepted by step_physics (kept for API compat)
+            band=self.cfg.band,      # accepted for API compat
             bc=self.cfg.bc,
-            **(self.cfg.physics or {}),   # <-- forward extra physics kwargs
+            # >>> pass through any extra physics knobs from defaults.json
+            **(self.cfg.physics or {}),
         )
 
         # --- compatibility shim: if some physics impl returns (2, Y, X) stack, take channel 0
