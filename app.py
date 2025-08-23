@@ -24,7 +24,7 @@ def load_defaults_strict(path: str = "defaults.json") -> Dict[str, Any]:
         st.stop()
     try:
         with open(path, "r") as f:
-            return json.load(f)  # strict JSON only
+            return json.load(f)  # strict JSON (no // or /* */ comments)
     except Exception as e:
         st.error(
             f"Failed to parse defaults.json as strict JSON.\n\n"
@@ -37,13 +37,11 @@ def load_defaults_strict(path: str = "defaults.json") -> Dict[str, Any]:
 def find_missing(cfg: Dict[str, Any]) -> List[str]:
     req_top = ["seed", "frames", "space", "k_flux", "k_motor", "diffuse", "decay", "band", "bc", "env"]
     missing: List[str] = [k for k in req_top if k not in cfg]
-
     if "env" not in cfg or not isinstance(cfg["env"], dict):
         missing += ["env.length", "env.frames", "env.noise_sigma"]
     else:
-        env = cfg["env"]
         for k in ["length", "frames", "noise_sigma"]:
-            if k not in env:
+            if k not in cfg["env"]:
                 missing.append(f"env.{k}")
     return missing
 
@@ -58,7 +56,7 @@ if missing_keys:
     st.stop()
 
 # ---------- session keys for plot uniqueness ----------
-for base in ("combo2d_count", "energy_count", "telemetry_count", "combo3d_count", "run_id"):
+for base in ("combo2d_count", "energy_count", "combo3d_count", "telemetry_count", "run_id"):
     if base not in st.session_state:
         st.session_state[base] = 0
 
@@ -75,7 +73,7 @@ def _num_step(v: float) -> float:
 def _float_slider_bounds(label: str, val: float) -> Tuple[float, float, float]:
     name = label.lower()
     step = round(_num_step(val), 6)
-    if 0.0 <= val <= 1.0 or any(s in name for s in ["sigma", "noise", "decay", "diffuse", "k_", "thr", "threshold", "opacity", "gamma", "floor"]):
+    if 0.0 <= val <= 1.0 or any(s in name for s in ["sigma","noise","decay","diffuse","k_","thr","threshold","opacity","gamma","floor"]):
         lo, hi = 0.0, 1.0
         if val > 1.0:
             hi = max(1.0, float(val) * 10.0)
@@ -89,7 +87,7 @@ def _int_slider_bounds(label: str, val: int) -> Tuple[int, int, int]:
     name = label.lower()
     if "seed" in name:
         return 0, 10_000_000, 1
-    if any(k in name for k in ["frame", "space", "length", "len", "height", "width", "band", "center", "gate"]):
+    if any(k in name for k in ["frame","space","length","len","height","width","band","center","gate"]):
         base = max(1, int(val))
         return 0, max(base * 10, base + 10), max(1, base // 10)
     if val >= 0:
@@ -143,7 +141,7 @@ with st.sidebar:
     st.header("Configuration (from defaults.json)")
     user_cfg = render_object("", deepcopy(cfg_default))
 
-# Optional UI knobs (use only if present; otherwise warn & disable feature)
+# Pull out optional UI knobs (present only if in defaults.json)
 had_live  = "live"  in user_cfg
 had_chunk = "chunk" in user_cfg
 had_thr3d = "thr3d" in user_cfg
@@ -157,13 +155,11 @@ max3d = int(user_cfg.pop("max3d",  40000))  if had_max3d else None
 vis   = user_cfg.pop("vis", {})             if had_vis   else None
 
 if not had_live or not had_chunk:
-    st.sidebar.warning("Streaming controls ('live', 'chunk') not found in defaults.json. Add them to control live updates.")
+    st.sidebar.warning("Optional streaming controls ('live', 'chunk') not found in defaults.json. Add them to control streaming via UI.")
 if not had_thr3d or not had_max3d:
-    st.sidebar.warning("3‑D controls ('thr3d', 'max3d') not found in defaults.json. 3‑D view will be disabled.")
-
-# Visual knobs for 2‑D heatmap
+    st.sidebar.warning("Optional 3‑D controls ('thr3d', 'max3d') not found in defaults.json. 3‑D view will be disabled unless you add them.")
 if vis is None:
-    st.sidebar.warning("Optional 'vis' block not found in defaults.json. Heatmap visibility controls will use internal defaults.")
+    st.sidebar.warning("Optional 'vis' block not found in defaults.json. Heatmap visibility controls will fall back to defaults.")
     heat_floor, heat_gamma, env_opacity, sub_opacity = 0.10, 1.0, 1.0, 0.85
 else:
     heat_floor  = float(vis.get("heat_floor", 0.10))
@@ -173,15 +169,14 @@ else:
 
 # ---------- Layout placeholders ----------
 st.title("Simulation")
-combo2d_ph  = st.empty()
-energy_ph   = st.empty()
-telemetry_ph= st.empty()
-plot3d_ph   = st.empty()
+combo2d_ph   = st.empty()
+energy_ph    = st.empty()
+telemetry_ph = st.empty()
+plot3d_ph    = st.empty()
 
 # ---------- Plot helpers ----------
 def _norm(A: np.ndarray) -> np.ndarray:
-    m = float(np.nanmin(A))
-    M = float(np.nanmax(A))
+    m = float(np.nanmin(A)); M = float(np.nanmax(A))
     if not np.isfinite(m) or not np.isfinite(M) or M - m < 1e-12:
         return np.zeros_like(A)
     return (A - m) / (M - m + 1e-12)
@@ -198,92 +193,67 @@ def _resample_rows(M: np.ndarray, new_len: int) -> np.ndarray:
     T, X = M.shape
     if X == new_len:
         return M
-    x_src = np.linspace(0.0, 1.0, X)
-    x_tgt = np.linspace(0.0, 1.0, new_len)
+    x_src = np.linspace(0.0, 1.0, X); x_tgt = np.linspace(0.0, 1.0, new_len)
     out = np.zeros((T, new_len), dtype=float)
     for t in range(T):
         out[t] = np.interp(x_tgt, x_src, M[t])
     return out
 
 def draw_combined_heatmap(ph, E: np.ndarray, S: np.ndarray, title="Env + Substrate (combined, zoomable)"):
-    if E.ndim == 3:
-        E = E[:, 0, :]
-    if S.ndim == 3:
-        S = S[:, 0, :]
-    if S.shape[1] != E.shape[1]:
-        S_res = _resample_rows(S, E.shape[1])
-    else:
-        S_res = S
+    if E.ndim == 3: E = E[:, 0, :]
+    if S.ndim == 3: S = S[:, 0, :]
+    S_res = _resample_rows(S, E.shape[1]) if S.shape[1] != E.shape[1] else S
     En = _apply_floor_gamma(_norm(E), heat_floor, heat_gamma)
     Sn = _apply_floor_gamma(_norm(S_res), heat_floor, heat_gamma)
-
     fig = go.Figure()
     fig.add_trace(go.Heatmap(z=En, coloraxis="coloraxis", zsmooth=False, name="Env", opacity=env_opacity))
     fig.add_trace(go.Heatmap(z=Sn, coloraxis="coloraxis2", zsmooth=False, name="Substrate", opacity=sub_opacity))
     fig.update_layout(
-        title=title,
-        xaxis_title="x (space)",
-        yaxis_title="t (time)",
+        title=title, xaxis_title="x (space)", yaxis_title="t (time)",
         coloraxis=dict(colorscale="Viridis", colorbar=dict(title="Env")),
         coloraxis2=dict(colorscale="Inferno", colorbar=dict(title="Substrate", x=1.08)),
-        height=620,
-        template="plotly_dark",
+        height=620, template="plotly_dark",
     )
     ph.plotly_chart(fig, use_container_width=True, theme=None, key=new_key("combo2d"))
 
-def _has_data(arr: List[float]) -> bool:
-    return isinstance(arr, list) and len(arr) > 0
-
-def draw_energy_timeseries(ph, hist, title="Energy vs time"):
+def draw_energy_timeseries(ph, t, e_cell, e_env, e_flux, title="Energy vs time"):
     fig = go.Figure()
-    t = hist.t
-    if _has_data(hist.E_cell):
-        fig.add_trace(go.Scatter(x=t, y=hist.E_cell, name="E_cell"))
-    if _has_data(hist.E_env):
-        fig.add_trace(go.Scatter(x=t, y=hist.E_env,  name="E_env"))
-    if _has_data(hist.E_flux):
-        fig.add_trace(go.Scatter(x=t, y=hist.E_flux, name="E_flux"))
-    fig.update_layout(
-        xaxis_title="t (frames)",
-        yaxis_title="energy",
-        title=title,
-        height=360,
-        template="plotly_dark",
-    )
+    fig.add_trace(go.Scatter(x=t, y=e_cell, name="E_cell"))
+    fig.add_trace(go.Scatter(x=t, y=e_env,  name="E_env"))
+    fig.add_trace(go.Scatter(x=t, y=e_flux, name="E_flux"))
+    fig.update_layout(xaxis_title="t (frames)", yaxis_title="energy", title=title, height=380, template="plotly_dark")
     ph.plotly_chart(fig, use_container_width=True, theme=None, key=new_key("energy"))
 
-def draw_telemetry_timeseries(ph, hist, title="Telemetry (derived)"):
-    # Only draw if any of the optional series exist & are non-empty
-    any_tel = any([
-        _has_data(getattr(hist, "entropy", [])),
-        _has_data(getattr(hist, "variance", [])),
-        _has_data(getattr(hist, "total_mass", [])),
-    ])
-    if not any_tel:
+def draw_extra_timeseries(ph, hist) -> None:
+    """
+    Draws optional telemetry (entropy, variance, total_mass) if present.
+    No dependency on defaults.json; pure presence detection.
+    """
+    have_entropy    = hasattr(hist, "entropy")    and len(hist.entropy)    == len(hist.t)
+    have_variance   = hasattr(hist, "variance")   and len(hist.variance)   == len(hist.t)
+    have_total_mass = hasattr(hist, "total_mass") and len(hist.total_mass) == len(hist.t)
+    if not (have_entropy or have_variance or have_total_mass):
         return
+
     fig = go.Figure()
-    t = hist.t
-    if _has_data(getattr(hist, "entropy", [])):
-        fig.add_trace(go.Scatter(x=t, y=hist.entropy, name="entropy"))
-    if _has_data(getattr(hist, "variance", [])):
-        fig.add_trace(go.Scatter(x=t, y=hist.variance, name="variance"))
-    if _has_data(getattr(hist, "total_mass", [])):
-        fig.add_trace(go.Scatter(x=t, y=hist.total_mass, name="total_mass"))
+    if have_entropy:
+        fig.add_trace(go.Scatter(x=hist.t, y=hist.entropy, name="entropy"))
+    if have_variance:
+        fig.add_trace(go.Scatter(x=hist.t, y=hist.variance, name="variance"))
+    if have_total_mass:
+        fig.add_trace(go.Scatter(x=hist.t, y=hist.total_mass, name="total_mass"))
+
     fig.update_layout(
-        xaxis_title="t (frames)",
-        yaxis_title="value",
-        title=title,
-        height=300,
-        template="plotly_dark",
-        legend=dict(orientation="h"),
+        xaxis_title="t (frames)", yaxis_title="value",
+        title="Extra telemetry",
+        height=360, template="plotly_dark", legend=dict(orientation="h")
     )
     ph.plotly_chart(fig, use_container_width=True, theme=None, key=new_key("telemetry"))
 
 def draw_sparse_3d(ph, E: np.ndarray, S: np.ndarray, thr: float, max_points: int):
     def _subsample(xx, yy, zz, vmax):
         n = len(xx)
-        if n <= vmax:
-            return xx, yy, zz
+        if n <= vmax: return xx, yy, zz
         idx = np.random.choice(n, size=vmax, replace=False)
         return xx[idx], yy[idx], zz[idx]
 
@@ -294,43 +264,27 @@ def draw_sparse_3d(ph, E: np.ndarray, S: np.ndarray, thr: float, max_points: int
         return (A - m) / (M - m + 1e-12)
 
     fig = go.Figure()
-
     if E.ndim == 2 and S.ndim == 2:
         En = _norm_local(E); Sn = _norm_local(S)
-        tE, xE = np.where(En >= thr)
-        tS, xS = np.where(Sn >= thr)
-        zE, yE = tE, np.zeros_like(tE)
-        zS, yS = tS, np.ones_like(tS)
+        tE, xE = np.where(En >= thr); tS, xS = np.where(Sn >= thr)
+        zE, yE = tE, np.zeros_like(tE); zS, yS = tS, np.ones_like(tS)
         xE, yE, zE = _subsample(xE, yE, zE, max_points // 2)
         xS, yS, zS = _subsample(xS, yS, zS, max_points // 2)
-        fig.add_trace(go.Scatter3d(x=xE, y=yE, z=zE, mode="markers",
-                                   marker=dict(size=2, opacity=0.7), name="Env"))
-        fig.add_trace(go.Scatter3d(x=xS, y=yS, z=zS, mode="markers",
-                                   marker=dict(size=2, opacity=0.8), name="Substrate"))
+        fig.add_trace(go.Scatter3d(x=xE, y=yE, z=zE, mode="markers", marker=dict(size=2, opacity=0.7), name="Env"))
+        fig.add_trace(go.Scatter3d(x=xS, y=yS, z=zS, mode="markers", marker=dict(size=2, opacity=0.8), name="Substrate"))
         scene = dict(xaxis_title="x", yaxis_title="layer", zaxis_title="t")
     else:
-        if E.ndim == 2:  # promote
-            E = E[:, None, :]
-        if S.ndim == 2:
-            S = S[:, None, :]
+        if E.ndim == 2: E = E[:, None, :]
+        if S.ndim == 2: S = S[:, None, :]
         En = _norm_local(E); Sn = _norm_local(S)
-        tE, yE, xE = np.where(En >= thr)
-        tS, yS, xS = np.where(Sn >= thr)
+        tE, yE, xE = np.where(En >= thr); tS, yS, xS = np.where(Sn >= thr)
         xE, yE, zE = _subsample(xE, yE, tE, max_points // 2)
         xS, yS, zS = _subsample(xS, yS, tS, max_points // 2)
-        fig.add_trace(go.Scatter3d(x=xE, y=yE, z=zE, mode="markers",
-                                   marker=dict(size=2, opacity=0.5), name="Env"))
-        fig.add_trace(go.Scatter3d(x=xS, y=yS, z=zS, mode="markers",
-                                   marker=dict(size=2, opacity=0.8), name="Substrate"))
+        fig.add_trace(go.Scatter3d(x=xE, y=yE, z=zE, mode="markers", marker=dict(size=2, opacity=0.5), name="Env"))
+        fig.add_trace(go.Scatter3d(x=xS, y=yS, z=zS, mode="markers", marker=dict(size=2, opacity=0.8), name="Substrate"))
         scene = dict(xaxis_title="x", yaxis_title="y", zaxis_title="t")
 
-    fig.update_layout(
-        title="Sparse 3‑D energy",
-        scene=scene,
-        height=640,
-        template="plotly_dark",
-        showlegend=True,
-    )
+    fig.update_layout(title="Sparse 3‑D energy", scene=scene, height=640, template="plotly_dark", showlegend=True)
     ph.plotly_chart(fig, use_container_width=True, theme=None, key=new_key("combo3d"))
 
 # ---------- Run ----------
@@ -338,7 +292,7 @@ if st.button("Run / Rerun", use_container_width=True):
     st.session_state["run_id"] += 1
     st.session_state["combo2d_count"] = 0
     st.session_state["energy_count"]  = 0
-    st.session_state["telemetry_count"] = 0
+    st.session_state["telemetry_count"]  = 0
     st.session_state["combo3d_count"] = 0
 
     ecfg = make_config_from_dict(user_cfg)
@@ -346,13 +300,16 @@ if st.button("Run / Rerun", use_container_width=True):
 
     def redraw(upto: int, final: bool = False):
         draw_combined_heatmap(combo2d_ph, engine.env[:upto+1], engine.S[:upto+1])
-        draw_energy_timeseries(energy_ph, engine.hist)
-        draw_telemetry_timeseries(telemetry_ph, engine.hist)
+        draw_energy_timeseries(energy_ph, engine.hist.t, engine.hist.E_cell, engine.hist.E_env, engine.hist.E_flux)
+        # Optional extra telemetry (only if History has those fields)
+        draw_extra_timeseries(telemetry_ph, engine.hist)
+        # 3D view only if optional knobs were provided
         if final and (thr3d is not None) and (max3d is not None):
             draw_sparse_3d(plot3d_ph, engine.env, engine.S, thr=float(thr3d), max_points=int(max3d))
         elif final and (thr3d is None or max3d is None):
             st.warning("3‑D view disabled: add 'thr3d' and 'max3d' to defaults.json to enable.")
 
+    # Streaming only if optional knobs were provided
     if (live is not None) and (chunk is not None) and live:
         last = [-1]
         def cb(t: int):
