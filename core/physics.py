@@ -72,7 +72,7 @@ def _edge_index_1d(n: int, bc: str) -> np.ndarray:
 
 
 # ---------------------------
-# Main physics (causal, conservative)
+# Main physics (causal, conservative, density-dependent speed)
 # ---------------------------
 def step_physics(
     prev_S: np.ndarray,
@@ -87,13 +87,13 @@ def step_physics(
     **kwargs,
 ) -> tuple[np.ndarray, float]:
     """
-    Single global tick, emergent local speeds, conservative neighbor exchange.
+    Single global tick with emergent local speeds and conservative neighbor exchange.
 
     - Local exchange speed is energy-dependent: kappa ~ (normalized |S|)^beta.
     - Exchange is conservative (what leaves one cell enters its neighbor).
-    - Env pull is capped per tick (flux_limit) so causality isn't broken by huge sources.
-    - Tiny zero-mean bath noise (T) -> entropy increases unless env keeps doing work.
-    - 'diffuse' now acts as a *cap* on conservative exchange per tick (finite local speed).
+    - Environment pull is bounded per tick (flux_limit) so causality isn't broken.
+    - Tiny zero-mean bath noise (T) gives natural entropy growth unless env does work.
+    - 'diffuse' acts as a *cap* on conservative exchange per tick (finite local speed).
     """
     S = np.asarray(prev_S, dtype=float)
     E = np.asarray(env_row, dtype=float)
@@ -104,12 +104,12 @@ def step_physics(
     if bc not in ("periodic", "reflect", "absorb", "wall"):
         bc = "reflect"
 
-    # ---- optional knobs (read if passed via kwargs, else defaults) ----
-    alpha_speed = float(kwargs.get("alpha_speed", 0.2))   # scales conservative exchange per tick
-    beta_speed  = float(kwargs.get("beta_speed", 1.0))    # how speed grows with local energy
-    flux_limit  = float(kwargs.get("flux_limit", 0.5))    # per-tick max magnitude of env pull
-    T_noise     = float(kwargs.get("T", 1e-3))            # micro-bath noise std
-    update_mode = str(kwargs.get("update_mode", "random")).lower()  # "random" | "checker" | "none"
+    # ---- optional knobs (from defaults.json via Config.physics) ----
+    alpha_speed   = float(kwargs.get("alpha_speed", 0.2))   # scales conservative exchange per tick
+    beta_speed    = float(kwargs.get("beta_speed",  1.0))   # how speed grows with local energy
+    flux_limit    = float(kwargs.get("flux_limit",  0.5))   # per-tick max magnitude of env pull
+    T_noise       = float(kwargs.get("T",           1e-3))  # micro-bath noise std
+    update_mode   = str(kwargs.get("update_mode",  "random")).lower()  # "random" | "checker" | "none"
     boundary_leak = float(kwargs.get("boundary_leak", 0.0)) if bc in ("absorb", "wall") else 0.0
 
     # ---- local “energy” proxy and conductivity ----
@@ -124,43 +124,24 @@ def step_physics(
         n = S.shape[0]
         edges = _edge_index_1d(n, bc)
 
+        def _sweep(indices):
+            for i in indices:
+                j = (i + 1) % n
+                if bc != "periodic" and i == n - 1:
+                    continue
+                k_e = min(kappa[i], kappa[j])
+                q = k_e * (new_S[i] - new_S[j])
+                q = float(np.clip(q, -diffuse, diffuse))
+                new_S[i] -= q
+                new_S[j] += q
+
         if update_mode == "random":
             rng.shuffle(edges)
-            for i in edges:
-                j = (i + 1) % n
-                if bc != "periodic" and j == 0 and i != n - 1:
-                    # in non-periodic mode edges never wrap; guard just in case
-                    continue
-                if bc != "periodic" and i == n - 1:
-                    continue
-                k_e = min(kappa[i], kappa[j])
-                q = k_e * (new_S[i] - new_S[j])
-                q = float(np.clip(q, -diffuse, diffuse))
-                new_S[i] -= q
-                new_S[j] += q
+            _sweep(edges)
         elif update_mode == "checker":
-            # even edges then odd edges
-            for start in (0, 1):
-                for i in edges[start::2]:
-                    j = (i + 1) % n
-                    if bc != "periodic" and i == n - 1:
-                        continue
-                    k_e = min(kappa[i], kappa[j])
-                    q = k_e * (new_S[i] - new_S[j])
-                    q = float(np.clip(q, -diffuse, diffuse))
-                    new_S[i] -= q
-                    new_S[j] += q
+            _sweep(edges[0::2]); _sweep(edges[1::2])
         else:
-            # one forward sweep
-            for i in edges:
-                j = (i + 1) % n
-                if bc != "periodic" and i == n - 1:
-                    continue
-                k_e = min(kappa[i], kappa[j])
-                q = k_e * (new_S[i] - new_S[j])
-                q = float(np.clip(q, -diffuse, diffuse))
-                new_S[i] -= q
-                new_S[j] += q
+            _sweep(edges)
 
         # boundary leak for absorb/wall
         if boundary_leak > 0.0 and n >= 2:
@@ -176,54 +157,20 @@ def step_physics(
         # ========== 2D conservative exchange (x then y sweeps) ==========
         Y, X = S.shape
 
-        # helper to iterate x-edges
-        def x_edges_iter():
-            if bc == "periodic":
-                cols = np.arange(X, dtype=int)
-                wrap = True
-            else:
-                cols = np.arange(X - 1, dtype=int)
-                wrap = False
-            return cols, wrap
-
-        # helper to iterate y-edges
-        def y_edges_iter():
-            if bc == "periodic":
-                rows = np.arange(Y, dtype=int)
-                wrap = True
-            else:
-                rows = np.arange(Y - 1, dtype=int)
-                wrap = False
-            return rows, wrap
-
         # X-sweep
-        cols, wrap = x_edges_iter()
+        cols = np.arange(X if bc == "periodic" else X - 1, dtype=int)
         if update_mode == "random":
             rng.shuffle(cols)
-            for x in cols:
-                x2 = (x + 1) % X
-                if not wrap and x == X - 1:
-                    continue
-                k_e = np.minimum(kappa[:, x], kappa[:, x2])
-                q = k_e * (new_S[:, x] - new_S[:, x2])
-                q = np.clip(q, -diffuse, diffuse)
-                new_S[:, x]  -= q
-                new_S[:, x2] += q
+            iters = [cols]
         elif update_mode == "checker":
-            for start in (0, 1):
-                for x in cols[start::2]:
-                    x2 = (x + 1) % X
-                    if not wrap and x == X - 1:
-                        continue
-                    k_e = np.minimum(kappa[:, x], kappa[:, x2])
-                    q = k_e * (new_S[:, x] - new_S[:, x2])
-                    q = np.clip(q, -diffuse, diffuse)
-                    new_S[:, x]  -= q
-                    new_S[:, x2] += q
+            iters = [cols[0::2], cols[1::2]]
         else:
-            for x in cols:
+            iters = [cols]
+
+        for idxs in iters:
+            for x in idxs:
                 x2 = (x + 1) % X
-                if not wrap and x == X - 1:
+                if bc != "periodic" and x == X - 1:
                     continue
                 k_e = np.minimum(kappa[:, x], kappa[:, x2])
                 q = k_e * (new_S[:, x] - new_S[:, x2])
@@ -232,33 +179,19 @@ def step_physics(
                 new_S[:, x2] += q
 
         # Y-sweep
-        rows, wrap = y_edges_iter()
+        rows = np.arange(Y if bc == "periodic" else Y - 1, dtype=int)
         if update_mode == "random":
             rng.shuffle(rows)
-            for y in rows:
-                y2 = (y + 1) % Y
-                if not wrap and y == Y - 1:
-                    continue
-                k_e = np.minimum(kappa[y, :], kappa[y2, :])
-                q = k_e * (new_S[y, :] - new_S[y2, :])
-                q = np.clip(q, -diffuse, diffuse)
-                new_S[y, :]  -= q
-                new_S[y2, :] += q
+            iters = [rows]
         elif update_mode == "checker":
-            for start in (0, 1):
-                for y in rows[start::2]:
-                    y2 = (y + 1) % Y
-                    if not wrap and y == Y - 1:
-                        continue
-                    k_e = np.minimum(kappa[y, :], kappa[y2, :])
-                    q = k_e * (new_S[y, :] - new_S[y2, :])
-                    q = np.clip(q, -diffuse, diffuse)
-                    new_S[y, :]  -= q
-                    new_S[y2, :] += q
+            iters = [rows[0::2], rows[1::2]]
         else:
-            for y in rows:
+            iters = [rows]
+
+        for idxs in iters:
+            for y in idxs:
                 y2 = (y + 1) % Y
-                if not wrap and y == Y - 1:
+                if bc != "periodic" and y == Y - 1:
                     continue
                 k_e = np.minimum(kappa[y, :], kappa[y2, :])
                 q = k_e * (new_S[y, :] - new_S[y2, :])
@@ -288,7 +221,7 @@ def step_physics(
     if T_noise > 0.0:
         new_S += T_noise * rng.standard_normal(size=new_S.shape)
 
-    # ---- exploratory motor kick, scaled by local energy (edges/active zones) ----
+    # ---- exploratory motor kick, scaled by local normalized energy ----
     if k_motor != 0.0:
         motor_scale = np.power(1e-6 + Sn, 0.5)
         new_S += float(k_motor) * motor_scale * rng.standard_normal(size=new_S.shape)
