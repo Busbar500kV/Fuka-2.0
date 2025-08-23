@@ -40,22 +40,23 @@ def _resample_2d(frame: np.ndarray, new_y: int, new_x: int) -> np.ndarray:
 
 def _entropy_from_array(A: np.ndarray) -> float:
     """
-    Shannon entropy (nats) of |A| normalized as a discrete distribution.
-    If the sum is ~0, return 0.0.
+    Shannon entropy over a nonnegative normalization of A.
+    We shift so min(A) -> 0, add tiny epsilon, then normalize to sum=1.
     """
-    p = np.abs(A).astype(float)
-    s = float(p.sum())
-    if s <= 1e-20:
+    a = np.asarray(A, dtype=float)
+    a = a - float(np.min(a))
+    a = a + 1e-12
+    s = float(np.sum(a))
+    if s <= 0.0 or not np.isfinite(s):
         return 0.0
-    p /= s
-    # avoid log(0)
-    p = np.clip(p, 1e-20, 1.0)
-    return float(-(p * np.log(p)).sum())
+    p = a / s
+    # safe entropy (ignore zeros after epsilon add)
+    return float(-np.sum(p * np.log(p)))
 
 
 class Engine:
     """
-    Streaming-capable engine.
+    Streaming‑capable engine.
 
     - 1D: env shape (T, X_env), substrate S shape (T, X).
     - 2D: env shape (T, Y_env, X_env), substrate S shape (T, Y, X) with Y=X=cfg.space.
@@ -89,18 +90,6 @@ class Engine:
         self._phys_kwargs = dict(self.cfg.physics or {})
 
     # ---------- steps ----------
-    def _record_metrics(self, t: int, cur: np.ndarray, env_mean: float, flux_metric: float):
-        """Common telemetry collection for both 1‑D and 2‑D paths."""
-        self.hist.t.append(t)
-        self.hist.E_cell.append(float(np.mean(cur)))
-        self.hist.E_env.append(float(env_mean))
-        self.hist.E_flux.append(float(flux_metric))
-
-        # New diagnostics
-        self.hist.total_mass.append(float(np.sum(cur)))
-        self.hist.variance.append(float(np.var(cur)))
-        self.hist.entropy.append(_entropy_from_array(cur))
-
     def _step_1d(self, t: int):
         # env row -> resample to substrate width
         e_row = self.env[t]                 # (X_env,)
@@ -123,7 +112,14 @@ class Engine:
         self.S[t] = cur
 
         # telemetry
-        self._record_metrics(t, cur, env_mean=float(np.mean(e_row)), flux_metric=flux)
+        self.hist.t.append(t)
+        self.hist.E_cell.append(float(np.mean(cur)))
+        self.hist.E_env.append(float(np.mean(e_row)))
+        self.hist.E_flux.append(float(flux))
+        # new telemetry
+        self.hist.variance.append(float(np.var(cur)))
+        self.hist.total_mass.append(float(np.sum(cur)))
+        self.hist.entropy.append(_entropy_from_array(cur))
 
     def _step_2d(self, t: int):
         # env frame (Y_env, X_env) -> resample to (Y, X)
@@ -155,7 +151,14 @@ class Engine:
         self.S[t] = cur
 
         # telemetry
-        self._record_metrics(t, cur, env_mean=float(np.mean(E_t_rs)), flux_metric=flux)
+        self.hist.t.append(t)
+        self.hist.E_cell.append(float(np.mean(cur)))
+        self.hist.E_env.append(float(np.mean(E_t_rs)))
+        self.hist.E_flux.append(float(flux))
+        # new telemetry
+        self.hist.variance.append(float(np.var(cur)))
+        self.hist.total_mass.append(float(np.sum(cur)))
+        self.hist.entropy.append(_entropy_from_array(cur))
 
     def step(self, t: int):
         if self.mode == "1d":
