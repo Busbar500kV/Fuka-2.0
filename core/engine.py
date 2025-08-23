@@ -40,7 +40,7 @@ def _resample_2d(frame: np.ndarray, new_y: int, new_x: int) -> np.ndarray:
 
 class Engine:
     """
-    Streaming‑capable engine.
+    Streaming-capable engine.
 
     - 1D: env shape (T, X_env), substrate S shape (T, X).
     - 2D: env shape (T, Y_env, X_env), substrate S shape (T, Y, X) with Y=X=cfg.space.
@@ -55,12 +55,12 @@ class Engine:
 
         # Determine dimensionality and allocate substrate
         if self.env.ndim == 2:
-            # 1‑D substrate
+            # 1-D substrate
             self.mode = "1d"
             self.X = int(cfg.space)
             self.S = np.zeros((self.T, self.X), dtype=float)
         elif self.env.ndim == 3:
-            # 2‑D substrate (square: Y=X=space)
+            # 2-D substrate (square: Y=X=space)
             self.mode = "2d"
             self.Y = int(cfg.space)
             self.X = int(cfg.space)
@@ -69,6 +69,9 @@ class Engine:
             raise ValueError(f"Unsupported env dimensions: {self.env.shape}")
 
         self.hist = History()
+
+        # Precompute physics kwargs from defaults.json (if any)
+        self._phys_kwargs = dict(self.cfg.physics or {})
 
     # ---------- steps ----------
     def _step_1d(self, t: int):
@@ -87,8 +90,7 @@ class Engine:
             rng=self.rng,
             band=self.cfg.band,
             bc=self.cfg.bc,
-            # >>> pass through any extra physics knobs from defaults.json
-            **(self.cfg.physics or {}),
+            **self._phys_kwargs,
         )
         # cur is (X,)
         self.S[t] = cur
@@ -113,10 +115,9 @@ class Engine:
             diffuse=self.cfg.diffuse,
             decay=self.cfg.decay,
             rng=self.rng,
-            band=self.cfg.band,      # accepted for API compat
+            band=self.cfg.band,
             bc=self.cfg.bc,
-            # >>> pass through any extra physics knobs from defaults.json
-            **(self.cfg.physics or {}),
+            **self._phys_kwargs,
         )
 
         # --- compatibility shim: if some physics impl returns (2, Y, X) stack, take channel 0
